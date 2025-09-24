@@ -18,8 +18,6 @@ Repository structure (high level)
 
 - `Single_ant/` — Single-antenna examples and small demos (pixelated patch, probe-fed patch, GA-based miniaturization examples).
 
-- `debug_script/` — Local debugging and plotting helpers (kept out of README usage examples).
-
 Note: the repository contains many MATLAB example scripts that use Antenna Toolbox and related toolboxes. Some folders contain generated figures used for documentation and analysis.
 
 Requirements
@@ -36,9 +34,9 @@ Quick start
 
 1. Open MATLAB in the repository directory (or add the folder to the path).
 
-1. Confirm required toolboxes and licenses are available in MATLAB.
+2. Confirm required toolboxes and licenses are available in MATLAB.
 
-1. Run a lightweight example to verify environment (recommended):
+3. Run a lightweight example to verify environment (recommended):
 
 ```powershell
 matlab -batch "single_pixel_antenna"
@@ -64,4 +62,4 @@ Contributing
 
 License
 
-- Add or update a license file as needed for your project. No license is included by default in this repository.
+This project is released under the MIT License. See the full license in the `LICENSE` file.
