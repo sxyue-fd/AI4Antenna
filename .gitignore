@@ -1,0 +1,12 @@
+# Ignore generated images
+*.png
+
+# Ignore MATLAB autosave files
+*.asv
+
+# Local debug scripts and personal experiments (do not commit)
+debug_script/
+
+# Optional: MATLAB temporary and workspace files
+*.mat
+*.mex*
