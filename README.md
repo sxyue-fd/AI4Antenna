@@ -62,4 +62,4 @@ Contributing
 
 License
 
-This project is released under the MIT License. See the full license in the `LICENSE` file.
+MIT license. See the LICENSE file for details.
