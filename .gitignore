@@ -1,5 +1,7 @@
-# Ignore generated images
+# Ignore output files
 *.png
+*.jpg
+*.h5
 
 # Ignore MATLAB autosave files
 *.asv
