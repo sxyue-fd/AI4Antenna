@@ -19,12 +19,12 @@ num_optimized_designs_target = 50;  % 目标通过GA生成的"半优化"样本�
 num_random_designs_target    = 100;  % 目标纯随机生成的样本数
 
 % --- GA 半优化配置 ---
-ga_options.PopulationSize = 40;     % 种群大小
+ga_options.PopulationSize = 50;     % 种群大小
 ga_options.MaxGenerations = 10;     % 最大迭代代数
 ga_options.FitnessLimit   = -15;    % 适应度函数提前终止阈值 (例如S11 < -12dB)
 ga_options.StallGenLimit  = 5;      % 如果5代最优解都没变化，则停止
-ga_options.EliteCount     = 4;      % 精英数量
-ga_options.CrossoverFraction = 0.7; % 交叉比例
+ga_options.EliteCount     = 2;      % 精英数量
+ga_options.CrossoverFraction = 0.8; % 交叉比例
 ga_options.PlotFcn        = @gaplotbestf; % 绘制适应度曲线
 ga_fitness_threshold      = -3;     % [dB] 用于从GA种群中筛选"好"天线的S11阈值
 
@@ -247,6 +247,7 @@ function params = design_antenna_parameters(sim_params, N, overlap_mm)
     params.W = params.L;
     params.h = lambda0 / 50;
     params.substrateMaterial = dielectric('Air');
+    params.substrateMaterial.Thickness = params.h;
     extension = 12 * params.h;
     board_L = params.L + extension;
     board_W = params.W + extension;
@@ -304,7 +305,7 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
     for i = 2:length(pixel_indices)
         patchShape = patchShape + designParams_LF.pixelShapes{pixel_indices(i)};
     end
-    
+
     ant = pcbStack(...
         'BoardShape', designParams_LF.ground, ...
         'BoardThickness', designParams_LF.h, ...

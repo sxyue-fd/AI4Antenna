@@ -39,6 +39,7 @@ L = lambda0 / 2;
 W = L * 1.0; 
 h = lambda0 / 50;
 substrateMaterial = dielectric('Air');
+substrateMaterial.Thickness = h;
 
 board_L = L * 1.2;
 board_W = W * 1.2;

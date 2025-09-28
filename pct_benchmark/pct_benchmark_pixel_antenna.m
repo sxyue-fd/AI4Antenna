@@ -169,6 +169,7 @@ function params = design_pixel_antenna_parameters(freq_ghz, span_ghz, num_points
     params.W = params.L * 1.5;
     params.h = lambda0 / 50;
     params.substrate = dielectric('Air');
+    params.substrate.Thickness = params.h;
 
     extension = 12 * params.h; 
     board_L = params.L + extension;

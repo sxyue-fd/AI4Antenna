@@ -188,6 +188,7 @@ function params = design_antenna_parameters(freq_ghz, span_ghz, num_points, ...
     params.W = params.L * 1.5;
     params.h = lambda0 / 50;
     params.substrateMaterial = dielectric('Air');
+    params.substrateMaterial.Thickness = params.h;
     extension = 12 * params.h;
     board_L = params.L + extension;
     board_W = params.W + extension;

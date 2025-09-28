@@ -29,6 +29,7 @@ L = lambda0 / 2;
 W = L * 1.5; 
 h = lambda0 / 50;
 substrateMaterial = dielectric('Air');
+substrateMaterial.Thickness = h;
 
 extension = 12 * h; 
 board_L = L + extension;
@@ -49,13 +50,13 @@ for r = 1:pixelResolution_N
     end
 end
 
-% 【核心修正】步骤 1: 先计算出目标像素的索引
+% 步骤 1: 先计算出目标像素的索引
 initialFeedLocation = [L/4, 0];
 feed_c_idx = floor((initialFeedLocation(1) - (-L/2)) / pixel_L) + 1;
 feed_r_idx = floor((initialFeedLocation(2) - (-W/2)) / pixel_W) + 1;
 feedPixelIdx = [max(1, min(pixelResolution_N, feed_r_idx)), max(1, min(pixelResolution_N, feed_c_idx))];
 
-% 【核心修正】步骤 2: 获取目标像素的中心坐标作为最终馈电位置
+% 步骤 2: 获取目标像素的中心坐标作为最终馈电位置
 targetPixelShape = pixelShapes{feedPixelIdx(1), feedPixelIdx(2)};
 finalFeedLocation = targetPixelShape.Center;
 
@@ -89,9 +90,12 @@ ant = pcbStack();
 ant.BoardShape = ground;
 ant.BoardThickness = h;
 ant.FeedDiameter = feedDiameter;
+% 忽略警告信息Dielectric thickness is updated with BoardThickness. Assign BoardThickness before setting up the Layers.
+% warning('off','antenna:antennaerrors:UpdatedDielectricThickness');
+% c = onCleanup(@() warning('on','antenna:antenna:BoardThicknessUpdate'));
 ant.Layers = {patchShape, substrateMaterial, ground}; 
 
-% 【核心修正】步骤 3: 使用对齐到中心的最终坐标
+% 步骤 3: 使用对齐到中心的最终坐标
 ant.FeedLocations = [finalFeedLocation, 1, 3]; 
 fprintf('pcbStack 对象创建完成。\n\n');
 

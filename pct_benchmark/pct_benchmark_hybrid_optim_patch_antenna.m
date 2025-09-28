@@ -196,6 +196,7 @@ function params = design_antenna_parameters(freq_ghz, span_ghz, num_points, mesh
     params.W = params.L * 1.5;
     params.h = lambda0 / 50;
     d_air = dielectric('Air');
+    d_air.Thickness = params.h;
     params.baseAntenna = patchMicrostrip('Length', params.L, 'Width', params.W, 'Height', params.h, 'Substrate', d_air, 'GroundPlaneLength', Inf, 'GroundPlaneWidth', Inf, 'FeedOffset', [params.L/4, 0]);
     f_start = (freq_ghz - span_ghz/2) * 1e9;
     f_stop = (freq_ghz + span_ghz/2) * 1e9;
