@@ -1,3 +1,4 @@
+function generate_antenna_dataset()
 % generate_antenna_dataset.m
 % 描述：使用遗传算法(GA)半优化策略生成小批量天线数据集
 
@@ -8,7 +9,6 @@
 % 半优化（semi-optim）策略：使用遗传算法GA，增加数据集中良好匹配的数据点
 % 数据集配比：50% 纯随机 + 50% 半优化 （待优化）
 % 在半优化中使用低精度仿真加速
-
 
 clear; clc; close all;
 
@@ -69,9 +69,12 @@ if num_workers_to_use > 0
 else
     pool = parpool();
 end
- % 确保程序结束时关闭并行池
+% 确保程序结束时关闭并行池
+cleanupObj = onCleanup(@() finalize_env());
 fprintf('并行池已启动，包含 %d 个 workers。\n\n', pool.NumWorkers);
 
+% 启动全局计时器
+tic_global = tic;
 %% 2) GA半优化阶段：收集优良设计
 fprintf('=== （阶段1) 开始遗传算法半优化阶段（低精度计算) ===\n');
 fprintf('目标：收集 S11 < %.1f dB 的设计\n\n', ga_fitness_threshold);
@@ -101,7 +104,7 @@ fitness_fcn = @(x) fitness_function_antenna(x, designParams_LF);
 % 启动计时器
 tic_ga = tic;
 % 运行GA
-[~, ~, ~, ~] = ga(fitness_fcn, num_vars, [], [], [], [], [], [], [], ga_opts);
+[~, ~, ~, ga_output] = ga(fitness_fcn, num_vars, [], [], [], [], [], [], [], ga_opts);
 time_ga_lf = toc(tic_ga); % 计时结束
 
 % 从OutputFcn中获取收集到的设计
@@ -112,7 +115,8 @@ if isempty(optimized_designs_raw)
     optimized_designs = [];
 else
     % 去重
-    optimized_designs = unique(cell2mat(optimized_designs_raw), 'rows');
+    temp_matrix = vertcat(optimized_designs_raw{:});
+    optimized_designs = unique(temp_matrix, 'rows');
 end
 
 fprintf('\nGA半优化阶段完成。\n');
@@ -222,20 +226,18 @@ h5create(dataset_filename, '/freq_hz', size(freq_vector), 'Datatype', 'double');
 h5write(dataset_filename, '/freq_hz', freq_vector);
 
 fprintf('\n数据集已保存到: %s\n\n', dataset_filename);
-cleanupObj = onCleanup(@() finalize_env());
-
-warning('on','antenna:antenna:BoardThicknessUpdate')
 
 %% 6) 性能总结
 % =========================================================================
 fprintf('=== 性能总结 ===\n');
-fprintf('GA 低保真优化阶段耗时:         %.2f 秒\n', time_ga_lf);
-fprintf('GA 设计高保真仿真阶段耗时:     %.2f 秒 (共 %d 个)\n', time_ga_hf, num_ga_tasks);
-fprintf('随机设计高保真仿真阶段耗时:   %.2f 秒 (共 %d 个)\n', time_rand_hf, num_rand_tasks);
+fprintf('GA 低保真优化阶段耗时:         %.2f 秒(共 %d 次仿真)\n', time_ga_lf, ga_output.funccount);
+fprintf('GA 设计高保真仿真阶段耗时:     %.2f 秒 (共 %d 次仿真)\n', time_ga_hf, num_ga_tasks);
+fprintf('随机设计高保真仿真阶段耗时:   %.2f 秒 (共 %d 次仿真)\n', time_rand_hf, num_rand_tasks);
 fprintf('---------------------------------------------------\n');
 fprintf('总计高保真仿真耗时:             %.2f 秒\n', time_ga_hf + time_rand_hf);
-fprintf('总程序运行耗时:                 %.2f 秒\n', toc(pool.StartTime));
+fprintf('总程序运行耗时:                 %.2f 秒\n', toc(tic_global));
 % =========================================================================
+end
 %% ====== 辅助函数 ======
 
 function params = design_antenna_parameters(sim_params, N, overlap_mm)
@@ -361,7 +363,9 @@ function result = simulate_single_antenna_hf(designVector, designParams_HF)
     N = designParams_HF.pixelResolution_N;
     designMatrix = reshape(designVector, N, N);
     
-    % 这个函数内不再强制馈电点，因为传入的设计已经处理过
+    % 强制馈电点位置放置金属像素
+    designMatrix(designParams_HF.feedPixelIdx(1), designParams_HF.feedPixelIdx(2)) = 1;
+
     pixel_indices = find(designMatrix);
     if isempty(pixel_indices)
         result.isValid = false; return;

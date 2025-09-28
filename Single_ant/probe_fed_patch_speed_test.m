@@ -4,11 +4,14 @@ function probe_fed_patch_speed_test
 % B) 有限地 + 空气 (patchMicrostrip)
 % C) 无限地 + 空气 (patchMicrostrip)
 % D) 有限地 + PTFE (pcbStack)  <-- 叠层PCB路线
+% B1) 复用天线B，计算S11
+% E) 复用天线B，计算S11+电流
+% F) 复用天线B，计算S11+方向图
 
 %% 基本参数
 f0 = 2.45e9;
 c0 = physconst('LightSpeed');
-f  = linspace(0.9*f0, 1.1*f0, 31);   % 频扫点适中，便于公平对比
+f  = linspace(0.9*f0, 1.1*f0, 21);   % 频扫点适中，便于公平对比
 
 % 统一厚度与经验尺寸
 h_ptfe = 1.6e-3;  er_ptfe = 2.1;
@@ -38,7 +41,7 @@ d_ptfe = dielectric('Teflon'); d_ptfe.Thickness = h_ptfe;
 antA = patchMicrostrip(Length=Lsq, Width=Wsq, Substrate=d_ptfe, ...
     GroundPlaneLength=Gx_finite, GroundPlaneWidth=Gy_finite, ...
     FeedOffset=[feed_x, feed_y]);
-[tA, ZA, mA] = time_case(antA, f, maxEdge_ptfe, 'A) patch: Finite GND + PTFE');
+% [tA, ZA, mA] = time_case(antA, f, maxEdge_ptfe, 'A) patch: Finite GND + PTFE');
 
 %% B) patchMicrostrip: 有限地 + 空气
 d_air = dielectric('Air'); d_air.Thickness = h_air;
@@ -70,7 +73,39 @@ stack.ViaDiameter = 1.0e-3;                 % 探针/过孔直径（可按需求
 stack.FeedLocations = [feed_x, feed_y, 1, 3];   % [x y layerID viaConnectionLayerID]
 stack.FeedDiameter  = 1.0e-3;
 
-[tD, ZD, mD] = time_case(stack, f, maxEdge_ptfe, 'D) pcbStack: Finite GND + PTFE');
+% [tD, ZD, mD] = time_case(stack, f, maxEdge_ptfe, 'D) pcbStack: Finite GND + PTFE');
+
+%% E) 有限地 + 空气: 计算S11+电流
+% 复用天线B (antB)
+fprintf('\n--- 测试S11 ---\n');
+tagB1 = 'B1) patch: Finite GND + Air (S11)';
+antB1 = clone(antB);
+tic;
+impedance(antB1, f);
+tB1 = toc;
+fprintf('[%s] 用时：%.3f s\n', tagB1, tB1);
+
+%% E) 有限地 + 空气: 计算S11+电流
+% 复用天线B (antB)
+fprintf('\n--- 测试S11+电流 ---\n');
+tagE = 'E) patch: Finite GND + Air (S11+Current)';
+antE = clone(antB);
+tic;
+impedance(antE, f);
+current(antE, f0); % 计算电流
+tE = toc;
+fprintf('[%s] 用时：%.3f s\n', tagE, tE);
+
+%% F) 有限地 + 空气: 计算方向图
+% 复用天线B (antB)
+fprintf('\n--- 测试S11+方向图 ---\n');
+tagF = 'F) patch: Finite GND + Air (S11+Pattern)';
+antF = clone(antB);
+tic;
+impedance(antF, f);
+pattern(antF, f0); % 计算方向图
+tF = toc;
+fprintf('[%s] 用时：%.3f s\n', tagF, tF);
 
 %% 汇总
 fprintf('\n=== 结果汇总（统一网格限值）===\n');
@@ -78,6 +113,9 @@ print_result('A 有限地+PTFE (patch)', tA, mA);
 print_result('B 有限地+空气 (patch)', tB, mB);
 print_result('C 无限地+空气 (patch)', tC, mC);
 print_result('D 有限地+PTFE (pcbStack)', tD, mD);
+fprintf('复用天线B计算S11，用时 = %7.3f s\n', tB1);
+fprintf('复用天线B计算S11+电流，用时 = %7.3f s\n', tE);
+fprintf('复用天线B计算S11+方向图，用时 = %7.3f s\n', tF);
 
 %% 简要 |S11| 对比
 figure('Name','|S11| 对比'); hold on; grid on;
