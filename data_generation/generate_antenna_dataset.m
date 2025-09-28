@@ -21,7 +21,7 @@ num_random_designs_target    = 100;  % 目标纯随机生成的样本数
 % --- GA 半优化配置 ---
 ga_options.PopulationSize = 40;     % 种群大小
 ga_options.MaxGenerations = 10;     % 最大迭代代数
-ga_options.FitnessLimit   = -12;    % 适应度函数提前终止阈值 (例如S11 < -12dB)
+ga_options.FitnessLimit   = -15;    % 适应度函数提前终止阈值 (例如S11 < -12dB)
 ga_options.StallGenLimit  = 5;      % 如果5代最优解都没变化，则停止
 ga_options.EliteCount     = 4;      % 精英数量
 ga_options.CrossoverFraction = 0.7; % 交叉比例
@@ -95,6 +95,7 @@ ga_opts = optimoptions('ga', ...
     'OutputFcn', @(opts, state, flag) ga_output_collector(opts, state, flag, ga_fitness_threshold));
 
 % 定义适应度函数句柄
+warning('off','antenna:antenna:BoardThicknessUpdate')
 fitness_fcn = @(x) fitness_function_antenna(x, designParams_LF);
 
 % 启动计时器
@@ -223,6 +224,8 @@ h5write(dataset_filename, '/freq_hz', freq_vector);
 fprintf('\n数据集已保存到: %s\n\n', dataset_filename);
 cleanupObj = onCleanup(@() finalize_env());
 
+warning('on','antenna:antenna:BoardThicknessUpdate')
+
 %% 6) 性能总结
 % =========================================================================
 fprintf('=== 性能总结 ===\n');
@@ -311,8 +314,9 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
     
     try
         s = sparameters(ant, designParams_LF.freq_sweep);
-        s11_db = rfparam(s, 1, 1, 'db'); 
-        fitness = min(s11_db); % 目标是最小化S11(dB)，即让匹配更好
+        s11_complex = squeeze(s.Parameters(1,1,:));
+        s11_db = 20 * log10(abs(s11_complex));
+        fitness = min(s11_db); 
         if isnan(fitness) || isinf(fitness)
             fitness = 10; % 惩罚仿真失败
         end

@@ -90,6 +90,7 @@ ant.BoardShape = ground;
 ant.BoardThickness = h;
 ant.FeedDiameter = feedDiameter;
 ant.Layers = {patchShape, substrateMaterial, ground}; 
+
 % 【核心修正】步骤 3: 使用对齐到中心的最终坐标
 ant.FeedLocations = [finalFeedLocation, 1, 3]; 
 fprintf('pcbStack 对象创建完成。\n\n');
