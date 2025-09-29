@@ -8,6 +8,7 @@
 
 # Local debug scripts and personal experiments (do not commit)
 debug_script/
+dataset_out/
 
 # Optional: MATLAB temporary and workspace files
 *.mat

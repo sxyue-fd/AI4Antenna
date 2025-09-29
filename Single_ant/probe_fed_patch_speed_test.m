@@ -41,7 +41,7 @@ d_ptfe = dielectric('Teflon'); d_ptfe.Thickness = h_ptfe;
 antA = patchMicrostrip(Length=Lsq, Width=Wsq, Substrate=d_ptfe, ...
     GroundPlaneLength=Gx_finite, GroundPlaneWidth=Gy_finite, ...
     FeedOffset=[feed_x, feed_y]);
-% [tA, ZA, mA] = time_case(antA, f, maxEdge_ptfe, 'A) patch: Finite GND + PTFE');
+[tA, ZA, mA] = time_case(antA, f, maxEdge_ptfe, 'A) patch: Finite GND + PTFE');
 
 %% B) patchMicrostrip: 有限地 + 空气
 d_air = dielectric('Air'); d_air.Thickness = h_air;
@@ -73,7 +73,7 @@ stack.ViaDiameter = 1.0e-3;                 % 探针/过孔直径（可按需求
 stack.FeedLocations = [feed_x, feed_y, 1, 3];   % [x y layerID viaConnectionLayerID]
 stack.FeedDiameter  = 1.0e-3;
 
-% [tD, ZD, mD] = time_case(stack, f, maxEdge_ptfe, 'D) pcbStack: Finite GND + PTFE');
+[tD, ZD, mD] = time_case(stack, f, maxEdge_ptfe, 'D) pcbStack: Finite GND + PTFE');
 
 %% E) 有限地 + 空气: 计算S11+电流
 % 复用天线B (antB)

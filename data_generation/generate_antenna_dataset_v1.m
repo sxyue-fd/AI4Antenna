@@ -1,5 +1,5 @@
-function generate_antenna_dataset()
-% generate_antenna_dataset.m
+function generate_antenna_dataset_v1()
+% generate_antenna_dataset_v1.m
 % 描述：使用遗传算法(GA)半优化策略生成小批量天线数据集
 
 % 主要特性：
@@ -28,27 +28,47 @@ ga_options.CrossoverFraction = 0.8; % 交叉比例
 ga_options.PlotFcn        = @gaplotbestf; % 绘制适应度曲线
 ga_fitness_threshold      = -3;     % [dB] 用于从GA种群中筛选"好"天线的S11阈值
 
-% --- 天线负载与仿真配置 ---
+% --- 天线仿真配置 ---
 pixelResolution_N  = 16;      % 贴片分辨率 (N x N)
 randomFillFactorRange    = [0.5, 0.9];     % 金属像素填充率范围 [min, max]
-overlap_mm         = 0.8;     % 像素间重叠距离 (mm)
+overlap_mm         = 0.2;     % 像素间重叠距离 (mm)
+
+geom.patch_L_mm     = 15;     % 贴片长度 L
+geom.patch_W_mm     = 15;     % 贴片宽度 W
+geom.sub_thick_mm   = 1;      % 介质厚度 h
+geom.substrate_name= 'Air';        % 'Air' or 'Teflon'...
+geom.board_margin_m= 12 * geom.sub_thick_mm; % 贴片外延边距
+geom.feed_init_xy  = [geom.patch_L_mm/4, 0]; % 初始馈电点（用于随机/默认）
+geom.feed_diam_mm   = min(geom.patch_L_mm/pixelResolution_N, ...
+                         geom.patch_W_mm/pixelResolution_N) / 10;
+
+% 板尺寸 = 贴片 + 外延
+geom.board_L_mm     = geom.patch_L_mm + 2*geom.board_margin_m;
+geom.board_W_mm     = geom.patch_W_mm + 2*geom.board_margin_m;
+
 
 % --- 高保真仿真参数 (用于最终数据集) ---
-hf_params.centerFreq_GHz     = 2.45;
-hf_params.freqSpan_GHz       = 0.4;
-hf_params.numFreqPoints      = 21;
+hf_params.fmin_GHz     = 8;
+hf_params.fmax_GHz     = 12;
+hf_params.numFreqPoints      = 41;
 hf_params.meshLambdaFraction = 20; % 更精细的网格
 
 % --- 低保真仿真参数 (用于GA适应度函数) ---
-lf_params.centerFreq_GHz     = 2.45;
-lf_params.freqSpan_GHz       = 0.4;
-lf_params.numFreqPoints      = 5;  % 更少的频点以加速
+lf_params.fmin_GHz     = 8;
+lf_params.fmax_GHz     = 12;
+lf_params.numFreqPoints      = 11;  % 更少的频点以加速
 lf_params.meshLambdaFraction = 10; % 更粗糙的网格以加速
 
 % --- 并行计算配置 ---
 % 0表示使用所有可用worker, 您也可以指定一个固定值, e.g., 16
 num_workers_to_use = 0; 
-dataset_filename = sprintf('antenna_dataset_%s.h5', datestr(now,'yyyymmdd_HHMMSS')); % HDF5格式
+
+% --- 输出配置 ---
+output_dir = fullfile(pwd, 'dataset_out');  % 统一输出文件夹
+if ~exist(output_dir, 'dir'), mkdir(output_dir); end
+ts = string(datetime("now","Format","yyyyMMdd_HHmmss"));  % 替代 datestr/now
+dataset_filename = fullfile(output_dir, "antenna_dataset_" + ts + ".h5");
+print_every = 20; % 每多少个点打印一次输出
 % =========================================================================
 
 %% 1) 初始化环境与设计参数
@@ -58,8 +78,8 @@ assert(license('test','Optimization_Toolbox')==1, '未检测到 Optimization Too
 
 fprintf('正在计算高/低保真共享设计参数...\n');
 % 计算高保真和低保真参数
-designParams_HF = design_antenna_parameters(hf_params, pixelResolution_N, overlap_mm);
-designParams_LF = design_antenna_parameters(lf_params, pixelResolution_N, overlap_mm);
+designParams_HF = design_antenna_parameters(hf_params, geom, pixelResolution_N, overlap_mm);
+designParams_LF = design_antenna_parameters(lf_params, geom, pixelResolution_N, overlap_mm);
 fprintf('参数计算完成。\n\n');
 
 % 一次性启动全局并行池
@@ -110,17 +130,34 @@ time_ga_lf = toc(tic_ga); % 计时结束
 optimized_designs_raw = ga_output_collector('get');
 
 if isempty(optimized_designs_raw)
-    warning('GA 未能找到任何满足阈值的设计！');
-    optimized_designs = [];
+    warning('GA 未能收集到满足初始阈值的个体，将从最终种群抽取候选。');
+    candidates = unique(ga_output.Population, 'rows'); % 最终代种群
 else
-    % 去重
-    temp_matrix = vertcat(optimized_designs_raw{:});
-    optimized_designs = unique(temp_matrix, 'rows');
+    candidates = unique(vertcat(optimized_designs_raw{:}), 'rows');
 end
 
-fprintf('\nGA半优化阶段完成。\n');
-fprintf('  -> 原始收集设计数: %d\n', numel(optimized_designs_raw));
-fprintf('  -> 去重后独特设计数: %d\n\n', size(optimized_designs, 1));
+% 用低保真 fitness 统一重评，按 S11(dB) 升序（更好）排序
+ncand = size(candidates,1);
+scores = nan(ncand,1);
+parfor i = 1:ncand
+    scores(i) = fitness_function_antenna(candidates(i,:), designParams_LF);
+end
+
+[~, ord] = sort(scores, 'ascend');
+candidates = candidates(ord,:);
+
+% 取 Top-K（保证 >= 目标数）；若仍不足，走随机补齐（极端情况）
+takeK = min(num_optimized_designs_target, size(candidates,1));
+optimized_designs = candidates(1:takeK, :);
+if size(optimized_designs,1) < num_optimized_designs_target
+    warning('满足条件的 GA 设计不足，随机补齐至目标数。');
+    need = num_optimized_designs_target - size(optimized_designs,1);
+    pad  = randi([0 1], need, size(candidates,2)); % 简单随机二进制补齐
+    optimized_designs = [optimized_designs; pad];
+end
+
+fprintf('\nGA半优化阶段完成（Top-K 选择）。\n');
+fprintf('  -> 候选数: %d，选取 %d 个。\n\n', size(candidates,1), size(optimized_designs,1));
 
 
 %% 3) 随机生成阶段
@@ -155,9 +192,11 @@ results_ga = cell(1, num_ga_tasks);
 
 if num_ga_tasks > 0
     fprintf('正在对 %d 个GA设计进行高保真仿真...\n', num_ga_tasks);
+    [dq_ga, ~] = setup_progress_tracker(num_ga_tasks, print_every, 'GA-HF');
     tic_ga_hf = tic; % 计时开始
     parfor k = 1:num_ga_tasks
         results_ga{k} = simulate_single_antenna_hf(optimized_designs(k,:), designParams_HF);
+        send(dq_ga, 1);
     end
     time_ga_hf = toc(tic_ga_hf); % 计时结束
 else
@@ -169,9 +208,11 @@ num_rand_tasks = size(random_designs, 1);
 results_rand = cell(1, num_rand_tasks);
 if num_rand_tasks > 0
     fprintf('正在对 %d 个随机设计进行高保真仿真...\n', num_rand_tasks);
+    [dq_rd, ~] = setup_progress_tracker(num_rand_tasks, 10, 'RAND-HF');
     tic_rand_hf = tic; % 计时开始
     parfor k = 1:num_rand_tasks
         results_rand{k} = simulate_single_antenna_hf(random_designs(k,:), designParams_HF);
+        send(dq_rd, 1);
     end
     time_rand_hf = toc(tic_rand_hf); % 计时结束
 else
@@ -216,14 +257,28 @@ fprintf('  - PyTorch 输出 Y 维度: %s\n', mat2str(size(Y_pytorch)));
 if exist(dataset_filename, 'file')
     delete(dataset_filename);
 end
-h5create(dataset_filename, '/X', size(X_pytorch), 'Datatype', 'single');
+
+% 压缩 & 分块（更快更小）
+B = size(X_pytorch,1); C = size(X_pytorch,2); H = size(X_pytorch,3); W = size(X_pytorch,4);
+chunkX = [min(64,B) C H W];
+h5create(dataset_filename, '/X', [B C H W], 'Datatype','single', ...
+         'ChunkSize',chunkX,'Deflate',5);
 h5write(dataset_filename, '/X', single(X_pytorch)); % 常用单精度
 
-h5create(dataset_filename, '/Y', size(Y_pytorch), 'Datatype', 'single');
+chunkY = [min(256,B) size(Y_mag,2)];
+h5create(dataset_filename, '/Y', size(Y_pytorch), 'Datatype', 'single', ...
+         'ChunkSize',chunkY,'Deflate',5);
 h5write(dataset_filename, '/Y', single(Y_pytorch));
 
 h5create(dataset_filename, '/freq_hz', size(freq_vector), 'Datatype', 'double');
 h5write(dataset_filename, '/freq_hz', freq_vector);
+
+% 把完整配置写入 HDF5 属性（JSON）
+meta = struct('hf_params',hf_params,'lf_params',lf_params, ...
+              'geom',geom,'N',pixelResolution_N,'overlap_mm',overlap_mm, ...
+              'targets',struct('ga',num_optimized_designs_target,'rand',num_random_designs_target), ...
+              'ga_options',ga_options,'timestamp',char(datetime("now")));
+h5writeatt(dataset_filename, '/', 'meta_json', jsonencode(meta));
 
 fprintf('\n数据集已保存到: %s\n\n', dataset_filename);
 
@@ -240,26 +295,30 @@ fprintf('总程序运行耗时:                 %.2f 秒\n', toc(tic_global));
 end
 %% ====== 辅助函数 ======
 
-function params = design_antenna_parameters(sim_params, N, overlap_mm)
-    f_center = sim_params.centerFreq_GHz * 1e9;
+function params = design_antenna_parameters(sim_params, geom, N, overlap_mm)
+    f_center = ((sim_params.fmin_GHz + sim_params.fmax_GHz)/2) * 1e9;
     c = physconst('LightSpeed');
     lambda0 = c / f_center;
     
-    params.L = lambda0 / 2;
-    params.W = params.L;
-    params.h = lambda0 / 50;
-    params.substrateMaterial = dielectric('Air');
-    params.substrateMaterial.Thickness = params.h;
-    extension = 12 * params.h;
-    board_L = params.L + extension;
-    board_W = params.W + extension;
-    params.ground = antenna.Rectangle('Length', board_L, 'Width', board_W, 'Center', [0 0]);
+    % 基本几何
+    params.L = geom.patch_L_mm / 1e3;
+    params.W = geom.patch_W_mm / 1e3;
+    params.h = geom.sub_thick_mm / 1e3;
 
+    % 介质
+    params.substrateMaterial = dielectric(geom.substrate_name);
+    params.substrateMaterial.Thickness = params.h;
+
+    % 板与地
+    params.ground = antenna.Rectangle('Length', geom.board_L_mm / 1e3, ...
+                                      'Width',  geom.board_W_mm / 1e3, ...
+                                      'Center', [0 0]);
+
+    % 像素化参数
     params.pixelResolution_N = N;
     params.overlap = overlap_mm / 1000;
-    pixel_L = params.L / N;
-    pixel_W = params.W / N;
-    
+    pixel_L = params.L / N;  pixel_W = params.W / N;
+
     params.pixelShapes = cell(N, N);
     startX = -params.L/2 + pixel_L/2;
     startY = -params.W/2 + pixel_W/2;
@@ -272,18 +331,20 @@ function params = design_antenna_parameters(sim_params, N, overlap_mm)
                                                         'Center', [centerX, centerY]);
         end
     end
-    
-    initialFeedLocation = [params.L/4, 0];
-    feed_c_idx = floor((initialFeedLocation(1) - (-params.L/2)) / pixel_L) + 1;
-    feed_r_idx = floor((initialFeedLocation(2) - (-params.W/2)) / pixel_W) + 1;
+
+    % 初始馈电像素索引（仅作为默认或随机阶段使用）
+    feed_c_idx = floor((geom.feed_init_xy(1) - (-params.L/2)) / pixel_L) + 1;
+    feed_r_idx = floor((geom.feed_init_xy(2) - (-params.W/2)) / pixel_W) + 1;
     params.feedPixelIdx = [max(1, min(N, feed_r_idx)), max(1, min(N, feed_c_idx))];
-    
+
+    % 注意：最终馈电点位置由传入的 feedIdx 决定（见 create_antenna_model）
     targetPixelShape = params.pixelShapes{params.feedPixelIdx(1), params.feedPixelIdx(2)};
     params.finalFeedLocation = targetPixelShape.Center;
-    params.feedDiameter = min(pixel_L, pixel_W) / 10;
-    
-    f_start = (sim_params.centerFreq_GHz - sim_params.freqSpan_GHz/2) * 1e9;
-    f_stop = (sim_params.centerFreq_GHz + sim_params.freqSpan_GHz/2) * 1e9;
+    params.feedDiameter = geom.feed_diam_mm / 1e3;
+
+    % 频率与网格
+    f_start = sim_params.fmin_GHz * 1e9;
+    f_stop  = sim_params.fmax_GHz * 1e9;
     params.freq_sweep = linspace(f_start, f_stop, sim_params.numFreqPoints);
     params.maxEdge = lambda0 / sim_params.meshLambdaFraction;
 end
@@ -303,10 +364,8 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
         return;
     end
     
-    patchShape = designParams_LF.pixelShapes{pixel_indices(1)};
-    for i = 2:length(pixel_indices)
-        patchShape = patchShape + designParams_LF.pixelShapes{pixel_indices(i)};
-    end
+    rectCells = designParams_LF.pixelShapes(pixel_indices);
+    patchShape = union_rectangles_batch(rectCells, 64);
 
     ant = pcbStack(...
         'BoardShape', designParams_LF.ground, ...
@@ -372,10 +431,8 @@ function result = simulate_single_antenna_hf(designVector, designParams_HF)
         result.isValid = false; return;
     end
     
-    patchShape = designParams_HF.pixelShapes{pixel_indices(1)};
-    for i = 2:length(pixel_indices)
-        patchShape = patchShape + designParams_HF.pixelShapes{pixel_indices(i)};
-    end
+    rectCells = designParams_HF.pixelShapes(pixel_indices);
+    patchShape = union_rectangles_batch(rectCells, 64);
     
     ant = pcbStack(...
         'BoardShape', designParams_HF.ground, ...
@@ -410,4 +467,41 @@ function finalize_env()
     % 清理函数
     try delete(gcp('nocreate')); end
     fprintf('并行池已关闭，环境已清理。\n');
+end
+
+function [dq, tick_fn] = setup_progress_tracker(total_count, print_every, label)
+% 用 DataQueue + 闭包打印进度；parfor 内 send(dq, 1) 即可。
+    if nargin < 3, label = 'Progress'; end
+    dq = parallel.pool.DataQueue;
+    S = struct('done',0,'total',total_count,'t0',tic,'print_every',max(1,print_every));
+    afterEach(dq, @(~) tick());
+    function tick()
+        S.done = S.done + 1;
+        if mod(S.done, S.print_every)==0 || S.done==S.total
+            t = toc(S.t0);
+            fprintf('\r[%s] %d/%d done (%.1fs elapsed)', label, S.done, S.total, t);
+            if S.done==S.total, fprintf('\n'); end
+        end
+    end
+    tick_fn = @tick; % 备用：非 parfor 场景手动 tick
+end
+
+function shape = union_rectangles_batch(rectCells, batch)
+% rectCells: {1xK} 的 antenna.Rectangle cell（非空）
+% batch: 每多少个执行一次简化；默认 64
+    if nargin < 2, batch = 64; end
+    ids = find(~cellfun('isempty', rectCells));
+    if isempty(ids), shape = []; return; end
+    shape = rectCells{ids(1)};
+    cnt = 1;
+    for ii = 2:numel(ids)
+        shape = shape + rectCells{ids(ii)};
+        cnt = cnt + 1;
+        if mod(cnt, batch) == 0
+            try
+                shape = shape.simplify; % 新版 toolbox 支持；旧版可忽略
+            catch
+            end
+        end
+    end
 end
