@@ -1,27 +1,61 @@
 function generate_antenna_dataset_v1()
 % generate_antenna_dataset_v1.m
-% 描述：使用遗传算法(GA)半优化策略生成小批量天线数据集
-
-% 主要特性：
-% 使用空气介质像素贴片天线为计算平台
-% 数据集：X = [B,C,H,W]维的张量，通道C表示馈电位置和像素贴片
-% 数据集标签: y = [B, S]，S11向量，以mag而非db表示
-% 半优化（semi-optim）策略：使用遗传算法GA，增加数据集中良好匹配的数据点
-% 数据集配比：50% 纯随机 + 50% 半优化 （待优化）
-% 在半优化中使用低精度仿真加速
+% =========================================================================
+% 描述：
+%   本脚本用于生成面向深度学习的小批量天线数据集。采用"GA半优化 + 随机"
+%   两阶段策略，结合低/高保真电磁仿真，输出可直接用于 PyTorch 的
+%   (X, Y) 张量和完整仿真配置的 HDF5 文件。
+%
+% 特点：
+%   1) 使用像素化贴片天线 (N×N)，空气介质。
+%   2) 个体编码 = [N^2 像素比特 | 馈电行bits | 馈电列bits]。
+%      → 支持 N 非 2 的幂，通过二进制+clip 解码。
+%   3) 半优化策略：遗传算法(GA)在低保真配置下寻找候选，Top-K 再送入
+%      高保真仿真，保证一定比例的优质天线。
+%   4) 随机策略：随机像素+随机馈电位置，补充多样性。
+%   5) 高保真仿真：全波电磁仿真 (sparameters)，输出 S11 幅度谱。
+%   6) 输出格式：
+%        - X: [B, C=2, H=N, W=N] → 通道1=像素矩阵, 通道2=馈电位置掩码
+%        - Y: [B, numFreqPoints] → S11 幅度 (mag)
+%        - freq_hz: 频率向量
+%        - meta_json: 完整配置 (参数、目标数、GA选项等)
+%   7) 使用并行池加速 (parfor)，并在每个 worker 内强制 maxNumCompThreads(1)
+%      避免过度线程化。
+%
+% 用户可配置内容：
+%   - num_optimized_designs_target, num_random_designs_target
+%   - GA 配置 (PopulationSize, MaxGenerations, FitnessLimit 等)
+%   - 天线几何参数 (patch 尺寸、介质厚度、地板尺寸、初始馈电点直径)
+%   - 高/低保真仿真频段、频点数量、网格划分参数
+%   - 并行池 worker 数 (num_workers_to_use)
+%   - 输出目录、进度打印频率
+%
+% 输出：
+%   - dataset_out/antenna_dataset_<时间戳>.h5
+%     包含 /X, /Y, /freq_hz, /meta_json
+%
+% 注意事项：
+%   - 需安装 Antenna Toolbox, Optimization Toolbox, Parallel Computing Toolbox。
+%   - 建议在 parpool 创建后执行 pctRunOnAll maxNumCompThreads(1)，
+%     避免每个 worker 内再开多线程，提升 CPU 利用率。
+%   - 高保真仿真耗时主要受网格划分与频扫影响，任务数大时请合理规划服务器资源。
+%
+% 作者：sxyue
+% 版本：v1 (2025.09.30)
+% =========================================================================
 
 clear; clc; close all;
 
 %% 0) User Configuration
 % =========================================================================
 % --- 数据集规模配置 ---
-num_optimized_designs_target = 50;  % 目标通过GA生成的"半优化"样本数
-num_random_designs_target    = 100;  % 目标纯随机生成的样本数
+num_optimized_designs_target = 128;  % 目标通过GA生成的"半优化"样本数
+num_random_designs_target    = 128;  % 目标纯随机生成的样本数
 
 % --- GA 半优化配置 ---
-ga_options.PopulationSize = 50;     % 种群大小
-ga_options.MaxGenerations = 10;     % 最大迭代代数
-ga_options.FitnessLimit   = -15;    % 适应度函数提前终止阈值 (例如S11 < -12dB)
+ga_options.PopulationSize = 64;     % 种群大小
+ga_options.MaxGenerations = 15;     % 最大迭代代数
+ga_options.FitnessLimit   = -40;    % 适应度函数早停阈值 (例如S11 < -40dB)
 ga_options.StallGenLimit  = 5;      % 如果5代最优解都没变化，则停止
 ga_options.EliteCount     = 2;      % 精英数量
 ga_options.CrossoverFraction = 0.8; % 交叉比例
@@ -36,32 +70,31 @@ overlap_mm         = 0.2;     % 像素间重叠距离 (mm)
 geom.patch_L_mm     = 15;     % 贴片长度 L
 geom.patch_W_mm     = 15;     % 贴片宽度 W
 geom.sub_thick_mm   = 1;      % 介质厚度 h
-geom.substrate_name= 'Air';        % 'Air' or 'Teflon'...
-geom.board_margin_m= 12 * geom.sub_thick_mm; % 贴片外延边距
+geom.substrate_name= 'Air';   % 介质名，从MATLAB库中选取
+
+geom.board_L_mm     = 30;
+geom.board_W_mm     = 30;
+
 geom.feed_init_xy  = [geom.patch_L_mm/4, 0]; % 初始馈电点（用于随机/默认）
 geom.feed_diam_mm   = min(geom.patch_L_mm/pixelResolution_N, ...
                          geom.patch_W_mm/pixelResolution_N) / 10;
-
-% 板尺寸 = 贴片 + 外延
-geom.board_L_mm     = geom.patch_L_mm + 2*geom.board_margin_m;
-geom.board_W_mm     = geom.patch_W_mm + 2*geom.board_margin_m;
 
 
 % --- 高保真仿真参数 (用于最终数据集) ---
 hf_params.fmin_GHz     = 8;
 hf_params.fmax_GHz     = 12;
-hf_params.numFreqPoints      = 41;
+hf_params.numFreqPoints      = 21;
 hf_params.meshLambdaFraction = 20; % 更精细的网格
 
 % --- 低保真仿真参数 (用于GA适应度函数) ---
 lf_params.fmin_GHz     = 8;
 lf_params.fmax_GHz     = 12;
-lf_params.numFreqPoints      = 11;  % 更少的频点以加速
+lf_params.numFreqPoints      = 5;  % 更少的频点以加速
 lf_params.meshLambdaFraction = 10; % 更粗糙的网格以加速
 
 % --- 并行计算配置 ---
-% 0表示使用所有可用worker, 您也可以指定一个固定值, e.g., 16
-num_workers_to_use = 0; 
+% 0表示使用所有可用worker, 也可以直接指定为cpu物理核数（不要用线程数）, e.g., 32
+num_workers_to_use = 32; 
 
 % --- 输出配置 ---
 output_dir = fullfile(pwd, 'dataset_out');  % 统一输出文件夹
@@ -89,6 +122,13 @@ if num_workers_to_use > 0
 else
     pool = parpool();
 end
+
+try
+    pctRunOnAll maxNumCompThreads(1)
+catch ME
+    warning('设定 worker 内线程数失败（可忽略）');
+end
+
 % 确保程序结束时关闭并行池
 cleanupObj = onCleanup(@() finalize_env());
 fprintf('并行池已启动，包含 %d 个 workers。\n\n', pool.NumWorkers);
@@ -103,7 +143,8 @@ fprintf('目标：收集 S11 < %.1f dB 的设计\n\n', ga_fitness_threshold);
 ga_output_collector('reset'); 
 
 % 配置GA选项
-num_vars = pixelResolution_N^2;
+nbits = ceil(log2(pixelResolution_N));
+num_vars = pixelResolution_N^2 + 2*nbits;
 ga_opts = optimoptions('ga', ...
     'PopulationType', 'bitstring', ...
     'PopulationSize', ga_options.PopulationSize, ...
@@ -113,7 +154,7 @@ ga_opts = optimoptions('ga', ...
     'EliteCount', ga_options.EliteCount, ...
     'CrossoverFraction', ga_options.CrossoverFraction, ...
     'Display', 'iter', ...
-    'PlotFcn', ga_options.PlotFcn, ...
+    'PlotFcn', [], ...
     'UseParallel', true, ... % 在GA内部使用并行计算
     'OutputFcn', @(opts, state, flag) ga_output_collector(opts, state, flag, ga_fitness_threshold));
 
@@ -163,18 +204,36 @@ fprintf('  -> 候选数: %d，选取 %d 个。\n\n', size(candidates,1), size(op
 %% 3) 随机生成阶段
 fprintf('=== (阶段2) 开始纯随机生成阶段 ===\n');
 num_designs_to_generate = max(0, num_random_designs_target);
-random_designs = zeros(num_designs_to_generate, num_vars);
+
+% ---- 位数：像素 N^2 + 馈电行/列二进制位 ----
+N = pixelResolution_N;
+nbits = ceil(log2(N));
+num_vars = N^2 + 2*nbits;
+
+% 预分配（logical 以便节省内存）
+random_designs = false(num_designs_to_generate, num_vars);
+
 rng('shuffle');
-feed_linear_idx = sub2ind([pixelResolution_N, pixelResolution_N], ...
-        designParams_HF.feedPixelIdx(1), designParams_HF.feedPixelIdx(2));
 
 for i = 1:num_designs_to_generate
-    % 随机生成可变填充率
+    % 1) 随机像素（按填充率），先只生成 N^2 段
     targetFill = randomFillFactorRange(1) + rand() * (randomFillFactorRange(2) - randomFillFactorRange(1));
-    vec = rand(1, num_vars) < targetFill;
-    % 强制馈电点为1
-    vec(feed_linear_idx) = 1;
-    random_designs(i, :) = vec;
+    pix_bits = rand(1, N^2) < targetFill;    % logical(0/1)
+    
+    % 2) 随机馈电位置（行/列 1..N，均匀），并把该像素强制置 1
+    feed_r = randi([1, N]);       % 行
+    feed_c = randi([1, N]);       % 列
+    feed_lin = sub2ind([N, N], feed_r, feed_c);
+    pix_bits(feed_lin) = true;    % 确保馈电像素为金属
+    
+    % 3) 馈电行/列的二进制编码（存 0..N-1，可避免非 2^k 带来的尾部偏置）
+    r_val0 = uint16(feed_r - 1);  % 0..N-1
+    c_val0 = uint16(feed_c - 1);
+    r_bits = int2bits(r_val0, nbits);  % 见第七步提供的工具函数
+    c_bits = int2bits(c_val0, nbits);
+    
+    % 4) 拼接： [像素N^2 | r_bits | c_bits]
+    random_designs(i, :) = [pix_bits(:).'  r_bits  c_bits];
 end
 fprintf('生成了 %d 个纯随机设计。\n\n', size(random_designs, 1));
 
@@ -265,7 +324,7 @@ h5create(dataset_filename, '/X', [B C H W], 'Datatype','single', ...
          'ChunkSize',chunkX,'Deflate',5);
 h5write(dataset_filename, '/X', single(X_pytorch)); % 常用单精度
 
-chunkY = [min(256,B) size(Y_mag,2)];
+chunkY = [min(256,B) size(Y_pytorch,2)];
 h5create(dataset_filename, '/Y', size(Y_pytorch), 'Datatype', 'single', ...
          'ChunkSize',chunkY,'Deflate',5);
 h5write(dataset_filename, '/Y', single(Y_pytorch));
@@ -278,7 +337,9 @@ meta = struct('hf_params',hf_params,'lf_params',lf_params, ...
               'geom',geom,'N',pixelResolution_N,'overlap_mm',overlap_mm, ...
               'targets',struct('ga',num_optimized_designs_target,'rand',num_random_designs_target), ...
               'ga_options',ga_options,'timestamp',char(datetime("now")));
-h5writeatt(dataset_filename, '/', 'meta_json', jsonencode(meta));
+
+meta_json = jsonencode(make_json_serializable(meta));
+h5writeatt(dataset_filename, '/', 'meta_json', meta_json);
 
 fprintf('\n数据集已保存到: %s\n\n', dataset_filename);
 
@@ -309,7 +370,7 @@ function params = design_antenna_parameters(sim_params, geom, N, overlap_mm)
     params.substrateMaterial = dielectric(geom.substrate_name);
     params.substrateMaterial.Thickness = params.h;
 
-    % 板与地
+    % 地板
     params.ground = antenna.Rectangle('Length', geom.board_L_mm / 1e3, ...
                                       'Width',  geom.board_W_mm / 1e3, ...
                                       'Center', [0 0]);
@@ -352,11 +413,29 @@ end
 
 function fitness = fitness_function_antenna(designVector, designParams_LF)
     % GA适应度函数，使用低保真参数进行快速评估
+    % --- 解码像素与馈电位置（兼容旧/新两种向量长度）---
     N = designParams_LF.pixelResolution_N;
-    designMatrix = reshape(designVector, N, N);
+    nbits = ceil(log2(N));
+    dv = designVector(:)';  % 保证行向量
+    expected_new = N^2 + 2*nbits;
 
-    % 强制馈电点为1
-    designMatrix(designParams_LF.feedPixelIdx(1), designParams_LF.feedPixelIdx(2)) = 1;
+    if numel(dv) == expected_new
+        % 新格式：像素 + 馈电行/列二进制位
+        [pix_bits, feed_rc] = split_design_bits(dv, N);
+    elseif numel(dv) == N^2
+        % 兼容旧格式：只有像素，馈电位置用默认（或 HF/LF 中的 feedPixelIdx）
+        pix_bits = dv;
+        feed_rc  = designParams_LF.feedPixelIdx;
+    else
+        error('设计向量长度不匹配：得到 %d，但期望 %d（新）或 %d（旧）。', ...
+              numel(dv), expected_new, N^2);
+    end
+
+    % 像素矩阵
+    designMatrix = reshape(pix_bits, N, N);
+
+    % 强制馈电像素为金属
+    designMatrix(feed_rc(1), feed_rc(2)) = 1;
     
     pixel_indices = find(designMatrix);
     if isempty(pixel_indices)
@@ -367,15 +446,9 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
     rectCells = designParams_LF.pixelShapes(pixel_indices);
     patchShape = union_rectangles_batch(rectCells, 64);
 
-    ant = pcbStack(...
-        'BoardShape', designParams_LF.ground, ...
-        'BoardThickness', designParams_LF.h, ...
-        'Layers', {patchShape, designParams_LF.substrateMaterial, designParams_LF.ground}, ...
-        'FeedDiameter', designParams_LF.feedDiameter, ...
-        'FeedLocations', [designParams_LF.finalFeedLocation, 1, 3]);
+    ant = create_antenna_model(patchShape, feed_rc, designParams_LF);
     
     try
-        m = mesh(ant, 'MaxEdgeLength', designParams_LF.maxEdge);
         s = sparameters(ant, designParams_LF.freq_sweep);
         s11_complex = squeeze(s.Parameters(1,1,:));
         s11_db = 20 * log10(abs(s11_complex));
@@ -421,10 +494,22 @@ end
 function result = simulate_single_antenna_hf(designVector, designParams_HF)
     % 单个天线的高保真仿真函数，用于最终的parfor循环
     N = designParams_HF.pixelResolution_N;
-    designMatrix = reshape(designVector, N, N);
-    
-    % 强制馈电点位置放置金属像素
-    designMatrix(designParams_HF.feedPixelIdx(1), designParams_HF.feedPixelIdx(2)) = 1;
+    nbits = ceil(log2(N));
+    dv = designVector(:)';  % 保证行向量
+    expected_new = N^2 + 2*nbits;
+
+    if numel(dv) == expected_new
+        [pix_bits, feed_rc] = split_design_bits(dv, N);
+    elseif numel(dv) == N^2
+        pix_bits = dv;
+        feed_rc  = designParams_HF.feedPixelIdx;
+    else
+        error('设计向量长度不匹配：得到 %d，但期望 %d（新）或 %d（旧）。', ...
+              numel(dv), expected_new, N^2);
+    end
+
+    designMatrix = reshape(pix_bits, N, N);
+    designMatrix(feed_rc(1), feed_rc(2)) = 1;
 
     pixel_indices = find(designMatrix);
     if isempty(pixel_indices)
@@ -434,15 +519,9 @@ function result = simulate_single_antenna_hf(designVector, designParams_HF)
     rectCells = designParams_HF.pixelShapes(pixel_indices);
     patchShape = union_rectangles_batch(rectCells, 64);
     
-    ant = pcbStack(...
-        'BoardShape', designParams_HF.ground, ...
-        'BoardThickness', designParams_HF.h, ...
-        'Layers', {patchShape, designParams_HF.substrateMaterial, designParams_HF.ground}, ...
-        'FeedDiameter', designParams_HF.feedDiameter, ...
-        'FeedLocations', [designParams_HF.finalFeedLocation, 1, 3]);
+    ant = create_antenna_model(patchShape, feed_rc, designParams_HF);
     
     try
-        m = mesh(ant, 'MaxEdgeLength', designParams_HF.maxEdge);
         s = sparameters(ant, designParams_HF.freq_sweep);
         s11_mag = abs(squeeze(s.Parameters(1,1,:)));
         
@@ -452,7 +531,7 @@ function result = simulate_single_antenna_hf(designVector, designParams_HF)
         X_data = zeros(N, N, 2);
         X_data(:,:,1) = designMatrix;
         feed_matrix = zeros(N, N);
-        feed_matrix(designParams_HF.feedPixelIdx(1), designParams_HF.feedPixelIdx(2)) = 1;
+        feed_matrix(feed_rc(1), feed_rc(2)) = 1;
         X_data(:,:,2) = feed_matrix;
         result.X = X_data;
         
@@ -503,5 +582,80 @@ function shape = union_rectangles_batch(rectCells, batch)
             catch
             end
         end
+    end
+end
+
+function S2 = make_json_serializable(S)
+% 递归地将结构中的 function_handle / objects 转为可 jsonencode 的类型
+    if isa(S, 'function_handle')
+        S2 = func2str(S);
+    elseif isstruct(S)
+        fn = fieldnames(S);
+        for k = 1:numel(fn)
+            S.(fn{k}) = make_json_serializable(S.(fn{k}));
+        end
+        S2 = S;
+    elseif iscell(S)
+        for k = 1:numel(S)
+            S{k} = make_json_serializable(S{k});
+        end
+        S2 = S;
+    elseif isa(S, 'optim.options.GA')
+        % options 对象也不好直接编码，转成 struct 再清洗
+        S2 = make_json_serializable(struct(S));
+    else
+        S2 = S; % 数值/字符/字符串/逻辑/表等可直接编码
+    end
+end
+
+function [pix_bits, feed_rc] = split_design_bits(vec, N)
+% vec: [1 x (N^2 + nbits_r + nbits_c)] 的 bit 向量
+    nbits = ceil(log2(N));
+    pix_bits = vec(1:N^2);
+    feed_r_bits = vec(N^2 + (1:nbits));
+    feed_c_bits = vec(N^2 + nbits + (1:nbits));
+    feed_r = bits2int(feed_r_bits) + 1;  % [0..N-1] -> [1..N]
+    feed_c = bits2int(feed_c_bits) + 1;
+    feed_rc = [min(N,max(1,feed_r)), min(N,max(1,feed_c))];
+end
+
+function v = bits2int(b)
+% b: [1 x nbits] logical/double in {0,1}; MSB-first
+    n = numel(b); v = 0;
+    for i = 1:n
+        v = bitshift(v,1) + (b(i)~=0);
+    end
+end
+
+function bits = int2bits(val, nbits)
+% val: >=0 的整数；输出 MSB-first 二进制
+    bits = false(1,nbits);
+    for i = nbits:-1:1
+        bits(i) = bitand(val,1);
+        val = bitshift(val,-1);
+    end
+end
+
+function ant = create_antenna_model(patchShape, feed_rc, params)
+% feed_rc: [row, col] 像素索引，决定最终 FeedLocations
+    N = params.pixelResolution_N;
+    pixel_L = params.L / N;  pixel_W = params.W / N;
+    startX = -params.L/2 + pixel_L/2;
+    startY = -params.W/2 + pixel_W/2;
+
+    cx = startX + (feed_rc(2)-1)*pixel_L;
+    cy = startY + (feed_rc(1)-1)*pixel_W;
+
+    ant = pcbStack( ...
+        'BoardShape', params.ground, ...
+        'BoardThickness', params.h, ...
+        'Layers', {patchShape, params.substrateMaterial, params.ground}, ...
+        'FeedDiameter', params.feedDiameter, ...
+        'FeedLocations', [cx, cy, 1, 3] );
+
+    try
+        m = mesh(ant, 'MaxEdgeLength', params.maxEdge);
+    catch
+        warning('网格控制失败，将采用默认网格');
     end
 end
