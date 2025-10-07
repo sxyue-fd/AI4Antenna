@@ -13,7 +13,7 @@ pixelFillFactor     = 0.6;
 overlap_mm          = 0.2;
 meshLambdaFraction  = 10;
 freqSpan_GHz        = 0.4;
-numFreqPoints       = 41;
+numFreqPoints       = 21;
 
 % 使用固定的随机种子
 rng(1); 

@@ -1,5 +1,5 @@
-function generate_antenna_dataset_v1()
-% generate_antenna_dataset_v1.m
+function generate_antenna_dataset_v2()
+% generate_antenna_dataset_v2.m
 % =========================================================================
 % 描述：
 %   本脚本用于生成面向深度学习的小批量天线数据集。采用"GA半优化 + 随机"
@@ -39,9 +39,10 @@ function generate_antenna_dataset_v1()
 %   - 建议在 parpool 创建后执行 pctRunOnAll maxNumCompThreads(1)，
 %     避免每个 worker 内再开多线程，提升 CPU 利用率。
 %   - 高保真仿真耗时主要受网格划分与频扫影响，任务数大时请合理规划服务器资源。
-%
+%   
 % 作者：sxyue
-% 版本：v1 (2025.09.30)
+% 版本：v2 (2025.10.08)
+% v2更新：随机生成阶段改为向量化版本；GA半优化放弃阈值机制，改为全量top-k筛选；
 % =========================================================================
 
 clear; clc; close all;
@@ -53,14 +54,15 @@ num_optimized_designs_target = 128;  % 目标通过GA生成的"半优化"样本�
 num_random_designs_target    = 128;  % 目标纯随机生成的样本数
 
 % --- GA 半优化配置 ---
+%  总候选=PopulationSize*MaxGenerations，从中选取top-K
 ga_options.PopulationSize = 64;     % 种群大小
-ga_options.MaxGenerations = 15;     % 最大迭代代数
-ga_options.FitnessLimit   = -40;    % 适应度函数早停阈值 (例如S11 < -40dB)
-ga_options.StallGenLimit  = 5;      % 如果5代最优解都没变化，则停止
+ga_options.Generations = 10;     % 迭代代数
+ga_options.FitnessLimit   = -Inf;   % 适应度函数早停阈值 (例如S11 < -40dB)
+ga_options.StallGenLimit  = 10;     % 如果n代最优解都没变化，则早停
 ga_options.EliteCount     = 2;      % 精英数量
 ga_options.CrossoverFraction = 0.8; % 交叉比例
+ga_options.mutationRate   = 0.02;   % 变异率
 ga_options.PlotFcn        = @gaplotbestf; % 绘制适应度曲线
-ga_fitness_threshold      = -3;     % [dB] 用于从GA种群中筛选"好"天线的S11阈值
 
 % --- 天线仿真配置 ---
 pixelResolution_N  = 16;      % 贴片分辨率 (N x N)
@@ -137,10 +139,6 @@ fprintf('并行池已启动，包含 %d 个 workers。\n\n', pool.NumWorkers);
 tic_global = tic;
 %% 2) GA半优化阶段：收集优良设计
 fprintf('=== （阶段1) 开始遗传算法半优化阶段（低精度计算) ===\n');
-fprintf('目标：收集 S11 < %.1f dB 的设计\n\n', ga_fitness_threshold);
-
-% 初始化用于收集优良设计的持久化变量
-ga_output_collector('reset'); 
 
 % 配置GA选项
 nbits = ceil(log2(pixelResolution_N));
@@ -148,15 +146,16 @@ num_vars = pixelResolution_N^2 + 2*nbits;
 ga_opts = optimoptions('ga', ...
     'PopulationType', 'bitstring', ...
     'PopulationSize', ga_options.PopulationSize, ...
-    'MaxGenerations', ga_options.MaxGenerations, ...
+    'MaxGenerations', ga_options.Generations, ...
     'FitnessLimit', ga_options.FitnessLimit, ...
     'StallGenLimit', ga_options.StallGenLimit, ...
     'EliteCount', ga_options.EliteCount, ...
     'CrossoverFraction', ga_options.CrossoverFraction, ...
+    'MutationFcn', {@mutationuniform, ga_options.mutationRate}, ... 
     'Display', 'iter', ...
     'PlotFcn', [], ...
     'UseParallel', true, ... % 在GA内部使用并行计算
-    'OutputFcn', @(opts, state, flag) ga_output_collector(opts, state, flag, ga_fitness_threshold));
+    'OutputFcn', @ga_output_allpop_with_scores);
 
 % 定义适应度函数句柄
 fitness_fcn = @(x) fitness_function_antenna(x, designParams_LF);
@@ -164,39 +163,52 @@ fitness_fcn = @(x) fitness_function_antenna(x, designParams_LF);
 % 启动计时器
 tic_ga = tic;
 % 运行GA
+ga_output_allpop_with_scores('reset');
 [~, ~, ~, ga_output] = ga(fitness_fcn, num_vars, [], [], [], [], [], [], [], ga_opts);
-time_ga_lf = toc(tic_ga); % 计时结束
+hist = ga_output_allpop_with_scores('get');
 
-% 从OutputFcn中获取收集到的设计
-optimized_designs_raw = ga_output_collector('get');
+% 合并所有代
+P = vertcat(hist.vecs{:});        % [M x D]，D=num_vars
+S = vertcat(hist.scores{:});      % [M x 1]
 
-if isempty(optimized_designs_raw)
-    warning('GA 未能收集到满足初始阈值的个体，将从最终种群抽取候选。');
-    candidates = unique(ga_output.Population, 'rows'); % 最终代种群
-else
-    candidates = unique(vertcat(optimized_designs_raw{:}), 'rows');
+% 去重：对 bitstring 做哈希，重复项保留"最优分数"（更小）
+keys = cell(size(P,1),1);
+for i = 1:size(P,1)
+    keys{i} = DataHash(P(i,:));   % 你已有的 DataHash；没有就用 md5
+end
+[ukeys, ~, ic] = unique(keys, 'stable');
+
+% 聚合每个唯一键的"最佳分数"及其对应向量
+best_score = inf(numel(ukeys),1);
+best_vec   = false(numel(ukeys), size(P,2));
+for i = 1:numel(ic)
+    k = ic(i);
+    if S(i) < best_score(k)
+        best_score(k) = S(i);
+        best_vec(k,:) = P(i,:);
+    end
 end
 
-% 用低保真 fitness 统一重评，按 S11(dB) 升序（更好）排序
-ncand = size(candidates,1);
-scores = nan(ncand,1);
-parfor i = 1:ncand
-    scores(i) = fitness_function_antenna(candidates(i,:), designParams_LF);
-end
+% 现在 best_vec/best_score 是"唯一候选池 + 已有分数"
+[~, ord] = sort(best_score, 'ascend');  % dB 越小越好
+candidates = best_vec(ord,:);
+scores     = best_score(ord);
 
-[~, ord] = sort(scores, 'ascend');
-candidates = candidates(ord,:);
-
-% 取 Top-K（保证 >= 目标数）；若仍不足，走随机补齐（极端情况）
-takeK = min(num_optimized_designs_target, size(candidates,1));
+% 取 Top-K
+K = num_optimized_designs_target;
+takeK = min(K, size(candidates,1));
 optimized_designs = candidates(1:takeK, :);
-if size(optimized_designs,1) < num_optimized_designs_target
-    warning('满足条件的 GA 设计不足，随机补齐至目标数。');
-    need = num_optimized_designs_target - size(optimized_designs,1);
-    pad  = randi([0 1], need, size(candidates,2)); % 简单随机二进制补齐
+optimized_scores  = scores(1:takeK);     %#ok<NASGU> % 如需记录
+
+% 若仍不足（极端情况）补齐随机
+if size(optimized_designs,1) < K
+    warning('候选不足，随机补齐至目标数；建议增大 PopulationSize/Generations 或提高变异率。');
+    need = K - size(optimized_designs,1);
+    pad  = randi([0 1], need, size(candidates,2));
     optimized_designs = [optimized_designs; pad];
 end
 
+time_ga_lf = toc(tic_ga); % 计时结束
 fprintf('\nGA半优化阶段完成（Top-K 选择）。\n');
 fprintf('  -> 候选数: %d，选取 %d 个。\n\n', size(candidates,1), size(optimized_designs,1));
 
@@ -208,42 +220,39 @@ num_designs_to_generate = max(0, num_random_designs_target);
 % ---- 位数：像素 N^2 + 馈电行/列二进制位 ----
 N = pixelResolution_N;
 nbits = ceil(log2(N));
-num_vars = N^2 + 2*nbits;
 
-% 预分配（logical 以便节省内存）
-random_designs = false(num_designs_to_generate, num_vars);
 
 rng('shuffle');
 
-for i = 1:num_designs_to_generate
-    % 1) 随机像素（按填充率），先只生成 N^2 段
-    targetFill = randomFillFactorRange(1) + rand() * (randomFillFactorRange(2) - randomFillFactorRange(1));
-    pix_bits = rand(1, N^2) < targetFill;    % logical(0/1)
-    
-    % 2) 随机馈电位置（行/列 1..N，均匀），并把该像素强制置 1
-    feed_r = randi([1, N]);       % 行
-    feed_c = randi([1, N]);       % 列
-    feed_lin = sub2ind([N, N], feed_r, feed_c);
-    pix_bits(feed_lin) = true;    % 确保馈电像素为金属
-    
-    % 3) 馈电行/列的二进制编码（存 0..N-1，可避免非 2^k 带来的尾部偏置）
-    r_val0 = uint16(feed_r - 1);  % 0..N-1
-    c_val0 = uint16(feed_c - 1);
-    r_bits = int2bits(r_val0, nbits);  % 见第七步提供的工具函数
-    c_bits = int2bits(c_val0, nbits);
-    
-    % 4) 拼接： [像素N^2 | r_bits | c_bits]
-    random_designs(i, :) = [pix_bits(:).'  r_bits  c_bits];
-end
-fprintf('生成了 %d 个纯随机设计。\n\n', size(random_designs, 1));
+% 1) 每个样本的随机填充率（行向量/列向量均可）
+fill_vec = randomFillFactorRange(1) + (randomFillFactorRange(2) - randomFillFactorRange(1)) * rand(num_designs_to_generate, 1);
 
+% 2) 向量化生成像素比特：U < fill_i
+U = rand(num_designs_to_generate, N^2);     % 每行一个样本
+pix_bits = U < fill_vec;                    % 隐式扩展，得到 logical(B, N^2)
+
+% 3) 随机馈电位置（1..N），并把该像素强制置 1（列主序线性索引）
+feed_r = randi([1, N], num_designs_to_generate, 1);
+feed_c = randi([1, N], num_designs_to_generate, 1);
+lin_idx_pix = feed_r + (feed_c - 1) * N;    % N×N 的列主序线性索引
+pix_bits(sub2ind([num_designs_to_generate, N^2], (1:num_designs_to_generate)', lin_idx_pix)) = true;
+
+% 4) 馈电行/列的二进制编码（MSB-first），val0 ∈ [0..N-1]
+r0 = uint16(feed_r - 1);  c0 = uint16(feed_c - 1);
+r_bits = false(num_designs_to_generate, nbits);
+c_bits = false(num_designs_to_generate, nbits);
+for k = 1:nbits
+    % bitget 第 k 位（LSB-first），我们写到 MSB-first 列（nbits-k+1）
+    r_bits(:, nbits-k+1) = bitget(r0, k);
+    c_bits(:, nbits-k+1) = bitget(c0, k);
+end
+
+% 5) 拼接得到最终设计向量（与 GA 完全一致的格式）
+random_designs = [pix_bits, r_bits, c_bits];  % logical(B, N^2+2*nbits)
+fprintf('生成了 %d 个纯随机设计。\n\n', size(random_designs, 1));
 
 %% 4) 最终高保真仿真与数据整合
 fprintf('=== (阶段3) 开始最终高保真仿真阶段 ===\n');
-
-% 合并所有需要仿真的设计
-all_designs_to_simulate = [optimized_designs; random_designs];
-num_total_tasks = size(all_designs_to_simulate, 1);
 
 % --- 4.1 仿真GA设计 ---
 num_ga_tasks = size(optimized_designs, 1);
@@ -444,7 +453,7 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
     end
     
     rectCells = designParams_LF.pixelShapes(pixel_indices);
-    patchShape = union_rectangles_batch(rectCells, 64);
+    patchShape = union_rectangles_batch(rectCells, 256);
 
     ant = create_antenna_model(patchShape, feed_rc, designParams_LF);
     
@@ -462,33 +471,32 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
 end
 
 
-function [state, options, optchanged] = ga_output_collector(options, state, flag, threshold_db)
-    % GA的OutputFcn，用于在每一代收集满足条件的个体
-    persistent good_designs;
+function [state, options, optchanged] = ga_output_allpop_with_scores(options, state, flag)
+% 收集每一代的全量种群及其适应度分数；支持 'reset' / 'get'
+    persistent all_vecs all_scores
     optchanged = false;
 
-    if ischar(options) && strcmp(options, 'reset')
-        good_designs = {};
-        state = []; options = [];
-        return;
-    elseif ischar(options) && strcmp(options, 'get')
-        state = good_designs; % 特殊调用方式，用于获取最终结果
-        options = [];
-        return;
-    end
-    
-    if strcmp(flag, 'iter')
-        scores = state.Score;
-        population = state.Population;
-        
-        % 找到当前代中所有满足阈值的个体
-        idx_good = find(scores < threshold_db);
-        
-        for i = 1:length(idx_good)
-            good_designs{end+1} = population(idx_good(i), :);
+    if ischar(options)
+        switch options
+            case 'reset'
+                all_vecs = {}; all_scores = {};
+                state = []; options = [];
+                return;
+            case 'get'
+                % 返回 cell -> 由调用方合并
+                state   = struct('vecs',{all_vecs}, 'scores',{all_scores});
+                options = [];
+                return;
         end
     end
+
+    if strcmp(flag, 'iter')
+        % 每一代：追加这代的 Population 和 Score
+        all_vecs{end+1}   = state.Population; %#ok<AGROW>
+        all_scores{end+1} = state.Score;      %#ok<AGROW>
+    end
 end
+
 
 
 function result = simulate_single_antenna_hf(designVector, designParams_HF)
@@ -658,4 +666,14 @@ function ant = create_antenna_model(patchShape, feed_rc, params)
     catch
         warning('网格控制失败，将采用默认网格');
     end
+end
+
+function h = DataHash(A)
+% 简易哈希：对 uint8 序列做 MD5
+    if ~isa(A,'uint8')
+        A = uint8(A);
+    end
+    md = java.security.MessageDigest.getInstance('MD5');
+    md.update(A(:));
+    h = char(org.apache.commons.codec.binary.Hex.encodeHex(md.digest())).';
 end
