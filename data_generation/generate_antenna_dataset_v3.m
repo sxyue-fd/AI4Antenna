@@ -1,5 +1,5 @@
-function generate_antenna_dataset_v2()
-% generate_antenna_dataset_v2.m
+function generate_antenna_dataset_v3()
+% generate_antenna_dataset_v3.m
 % =========================================================================
 % 描述：
 %   本脚本用于生成面向深度学习的小批量天线数据集。采用"GA半优化 + 随机"
@@ -41,11 +41,10 @@ function generate_antenna_dataset_v2()
 %   - 高保真仿真耗时主要受网格划分与频扫影响，任务数大时请合理规划服务器资源。
 %   
 % 作者：sxyue
-% 版本：v2 (2025.10.08)
+% 版本：v3 (2025.10.09)
 
-% v2更新：
-% (1) 随机生成阶段改为向量化版本；
-% (2) GA半优化放弃阈值机制，改为全量top-k筛选；
+% v3更新：
+% 修改适应度和分数函数，引入带宽奖励项
 % =========================================================================
 
 clear; clc; close all;
@@ -463,8 +462,27 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
     try
         s = sparameters(ant, designParams_LF.freq_sweep);
         s11_complex = squeeze(s.Parameters(1,1,:));
-        s11_db = 20 * log10(abs(s11_complex));
-        fitness = min(s11_db); 
+        s11_db = 20 * log10(abs(s11_complex + eps));
+
+        % 使用s11最小值和带宽的组合适应度函数
+        % 1) 原始适应度项：S11最小值 (代表匹配深度)
+        term_s11 = min(s11_db);
+        
+        % 2) 带宽奖励项：低于-10dB的频点数量 (代表匹配宽度)
+        %    我们希望最大化这个数量，因此在cost中它应该是负的奖励
+        num_points_below_10db = sum(s11_db < -10);
+
+        % 3) 定义带宽奖励的权重 (w_bw)
+        %    这是一个超参数，用于平衡"深度"和"宽度"的重要性。
+        %    term_s11 的范围通常在 [-40, -10]
+        %    num_points_below_10db 的范围在 [0, 21]
+        %    选择 w_bw=1.5 使得带宽奖励的量级与S11项大致相当。
+        w_bw = 5; 
+        
+        % 4) 组合适应度函数
+        %    我们的目标是最小化cost，所以奖励项要用减法。
+        fitness = term_s11 - w_bw * num_points_below_10db;
+
         if isnan(fitness) || isinf(fitness)
             fitness = 10; % 惩罚仿真失败
         end

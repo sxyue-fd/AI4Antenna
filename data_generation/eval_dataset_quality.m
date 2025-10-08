@@ -8,7 +8,7 @@ function eval_dataset_quality()
 % 用法：
 %   eval_dataset_quality('dataset_out/antenna_dataset_20251007_123456.h5')
 
-h5path = 'dataset_out/antenna_dataset_20251007_200314.h5';
+h5path = 'dataset_out/antenna_dataset_20251008_180003.h5';
 assert(isfile(h5path), '文件不存在：%s', h5path);
 
 fprintf('读取数据：%s\n', h5path);
@@ -96,7 +96,11 @@ bwGHz = bw10 / 1e9;
 fprintf('-10 dB 带宽(最大连续)：P50=%.3f GHz, P90=%.3f GHz, 最大=%.3f GHz\n', ...
     prctile(bwGHz,50), prctile(bwGHz,90), max(bwGHz));
 fprintf('像素海明距离（平均）：%.3f\n', mean_hamming);
-fprintf('满足任意 -10 dB 的样本比例：%.1f%%\n', 100*mean(bw10>0));
+% 在输出统计部分，增加或修改这一行
+fprintf('满足 min(S11) < -10 dB 的样本比例：%.1f%%\n', 100 * mean(min_db < -10));
+
+% 同时，为了避免混淆，修改之前那行的标签
+fprintf('拥有非零-10dB带宽的样本比例：%.1f%%\n', 100*mean(bw10>0));
 
 % --- 可视化 ---
 [~, ~, ~] = fileparts(h5path);
