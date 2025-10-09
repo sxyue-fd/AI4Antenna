@@ -1,12 +1,11 @@
 function single_pixel_antenna_with_current_analysis_2()
-% single_pixel_antenna_with_current_analysis2
+% single_pixel_antenna_with_current_analysis_2
 % -------------------------------------------------------------------------
 % 仿真像素贴片 + 电流分析
-% 修复点：
+% 修复与增强：
 %  1) 图2蒙版与含 overlap 的真实几何一致（修复B）
-%  2) 插值去重不再修改 J_mag_original，避免长度不一致
-%  3) 像素平均使用"最近像素中心"分配；维度赋值安全
-%  4) 图3用像素中心坐标；RMSE 矢量化且强制列向量
+%  2) 像素平均使用"最近像素中心"分配；维度赋值安全
+%  3) 图3 基于图2插值结果的像素平均计算（图3）
 % -------------------------------------------------------------------------
 
 clc; clear; close all;
@@ -118,45 +117,34 @@ colorbar;
 
 % 5.2 原始电流数据
 [J_surface, triangle_centroids] = current(ant, f_center);
-if size(J_surface,1) == 3  % 每列一个三分量
-    J_mag_original = vecnorm(J_surface, 2, 1);   % 1 x M
+if size(J_surface,1) == 3
+    J_mag_original = vecnorm(J_surface, 2, 1);
 else
-    J_mag_original = vecnorm(J_surface, 2, 2).'; % M x 1 -> 1 x M
+    J_mag_original = vecnorm(J_surface, 2, 2).';
 end
-num_triangles = size(J_surface, 2);              % 重要：M
 
-% 5.3 插值绘制的高分辨率幅值图（插值用去重，但不改 J_mag_original）
+% 5.3 插值绘制高分辨率电流幅值图
 fprintf('  生成 [图2] 插值绘制的高分辨率幅值图...\n');
 figure('Name', '图2：高分辨率电流幅值图 (插值)');
 
-% 散点坐标
-if size(triangle_centroids,1) >= 2
-    x_scatter = triangle_centroids(1, :);
-    y_scatter = triangle_centroids(2, :);
-else
-    x_scatter = triangle_centroids(:,1)';
-    y_scatter = triangle_centroids(:,2)';
-end
+x_scatter = triangle_centroids(1, :);
+y_scatter = triangle_centroids(2, :);
 
-% —— 去重仅用于插值；不要改动 J_mag_original —— %
 XY = [x_scatter(:), y_scatter(:)];
 [~, ia, ~] = unique(XY, 'rows', 'stable');
-x_scatter_u       = x_scatter(ia);
-y_scatter_u       = y_scatter(ia);
-J_mag_for_interp  = J_mag_original(ia);   % 新变量，仅供插值使用
+x_scatter_u = x_scatter(ia);
+y_scatter_u = y_scatter(ia);
+J_mag_for_interp = J_mag_original(ia);
 
-% 插值网格（这里保持原范围；如需包含外扩 overlap，可自行外扩）
 interp_resolution = 200;
 xq = linspace(patch_origin(1), patch_origin(1) + L, interp_resolution);
 yq = linspace(patch_origin(2), patch_origin(2) + W, interp_resolution);
 [Xq, Yq] = meshgrid(xq, yq);
 
-% 插值
 F = scatteredInterpolant(x_scatter_u(:), y_scatter_u(:), J_mag_for_interp(:), 'natural');
 F.ExtrapolationMethod = 'none';
 J_interp_mag = F(Xq, Yq);
 
-% 【修复B】基于真实金属形状(含 overlap)生成蒙版
 [rr_on, cc_on] = find(designVector == 1);
 cx = pixel_centers_x(cc_on);
 cy = pixel_centers_y(rr_on);
@@ -179,137 +167,44 @@ title('图2：手动绘制的高分辨率电流幅值 (插值+蒙版)');
 xlabel('X (m)'); ylabel('Y (m)');
 colormap(parula);
 
-%% 5.4 计算像素化平均电流
-fprintf('  正在执行\"分区求平均\"操作...\n');
+%% 5.4 基于插值图的像素化平均电流 (新增)
+fprintf('  基于插值图计算像素平均电流...\n');
 
-% ---------------- 原始矢量平均再取模 ---------------- %
-pixel_current_sum   = zeros(pixelResolution_N, pixelResolution_N, 3); 
-pixel_mesh_count    = zeros(pixelResolution_N, pixelResolution_N);
-triangle_to_pixel_map = zeros(num_triangles, 2);  % 0 表示未映射
+pixel_N = pixelResolution_N;
+dx = L / pixel_N; dy = W / pixel_N;
+avg_pixel_current_interp = NaN(pixel_N, pixel_N);
 
-for i = 1:num_triangles
-    ci = triangle_centroids(:, i).';
-    x = ci(1); y = ci(2);
-
-    % 最近像素中心
-    c_idx = round((x - patch_origin(1)) / pixel_L + 0.5);
-    r_idx = round((y - patch_origin(2)) / pixel_W + 0.5);
-
-    if c_idx < 1 || c_idx > pixelResolution_N || r_idx < 1 || r_idx > pixelResolution_N
-        continue;
+for r = 1:pixel_N
+    for c = 1:pixel_N
+        x_min = patch_origin(1) + (c-1)*dx;
+        x_max = patch_origin(1) + c*dx;
+        y_min = patch_origin(2) + (r-1)*dy;
+        y_max = patch_origin(2) + r*dy;
+        in_pixel = (Xq >= x_min & Xq < x_max & ...
+                    Yq >= y_min & Yq < y_max & mask);
+        vals = J_interp_mag(in_pixel);
+        if ~isempty(vals)
+            avg_pixel_current_interp(r,c) = mean(vals,'omitnan');
+        end
     end
-    if ~designVector(r_idx, c_idx)
-        continue;
-    end
-
-    % 矢量累加
-    pixel_current_sum(r_idx, c_idx, :) = pixel_current_sum(r_idx, c_idx, :) ...
-                                       + reshape(J_surface(:, i), [1, 1, 3]);
-    pixel_mesh_count(r_idx, c_idx) = pixel_mesh_count(r_idx, c_idx) + 1;
-
-    triangle_to_pixel_map(i, :) = [r_idx, c_idx];
 end
+avg_pixel_current_interp(~designVector) = NaN;
 
-% 矢量平均
-avg_pixel_current = NaN(size(pixel_current_sum));
-has_data = pixel_mesh_count > 0;
-for k = 1:3
-    tmp_sum = pixel_current_sum(:,:,k);
-    tmp_avg = NaN(size(tmp_sum));
-    tmp_avg(has_data) = tmp_sum(has_data) ./ pixel_mesh_count(has_data);
-    avg_pixel_current(:,:,k) = tmp_avg;
-end
-
-avg_pixel_current_magnitude_vec = vecnorm(avg_pixel_current, 2, 3);
-avg_pixel_current_magnitude_vec(~designVector) = NaN;
-
-% ---------------- 新增：取模后再平均 ---------------- %
-pixel_current_mag_sum = zeros(pixelResolution_N, pixelResolution_N); 
-pixel_mesh_count2     = zeros(pixelResolution_N, pixelResolution_N);
-
-for i = 1:num_triangles
-    ci = triangle_centroids(:, i).';
-    x = ci(1); y = ci(2);
-
-    % 最近像素中心
-    c_idx = round((x - patch_origin(1)) / pixel_L + 0.5);
-    r_idx = round((y - patch_origin(2)) / pixel_W + 0.5);
-
-    if c_idx < 1 || c_idx > pixelResolution_N || r_idx < 1 || r_idx > pixelResolution_N
-        continue;
-    end
-    if ~designVector(r_idx, c_idx)
-        continue;
-    end
-
-    % 幅值累加（区别在这里）
-    pixel_current_mag_sum(r_idx, c_idx) = pixel_current_mag_sum(r_idx, c_idx) ...
-                                        + norm(J_surface(:, i));
-    pixel_mesh_count2(r_idx, c_idx) = pixel_mesh_count2(r_idx, c_idx) + 1;
-end
-
-% 幅值平均
-avg_pixel_current_magnitude_mod = NaN(size(pixel_current_mag_sum));
-has_data2 = pixel_mesh_count2 > 0;
-avg_pixel_current_magnitude_mod(has_data2) = ...
-    pixel_current_mag_sum(has_data2) ./ pixel_mesh_count2(has_data2);
-avg_pixel_current_magnitude_mod(~designVector) = NaN;
-
-%% 5.5 图像比较
-fprintf('  正在生成 [图3/图3b] 像素化幅值图...\n');
-
-figure('Name', '图3：像素化低分辨率电流幅值对比');
-subplot(1,2,1);
-imagesc(pixel_centers_x, pixel_centers_y, avg_pixel_current_magnitude_vec);
+figure('Name','图3：基于插值图的像素平均电流');
+imagesc(pixel_centers_x, pixel_centers_y, avg_pixel_current_interp);
 set(gca,'YDir','normal'); axis equal tight;
 colorbar; colormap(parula);
 xlabel('X (m)'); ylabel('Y (m)');
-title('矢量平均 → 再取模');
+title('图3：基于插值图的像素平均电流');
 
-subplot(1,2,2);
-imagesc(pixel_centers_x, pixel_centers_y, avg_pixel_current_magnitude_mod);
-set(gca,'YDir','normal'); axis equal tight;
-colorbar; colormap(parula);
-xlabel('X (m)'); ylabel('Y (m)');
-title('取模 → 再平均');
+%% 5.5 可选：误差评估（插值像素 vs 原插值图）
+J_recon = imresize(avg_pixel_current_interp, [interp_resolution, interp_resolution], 'nearest');
+valid = isfinite(J_interp_mag) & isfinite(J_recon);
+rmse_interp = sqrt(mean((J_interp_mag(valid) - J_recon(valid)).^2));
+nrmse_interp = rmse_interp / mean(J_interp_mag(valid));
+fprintf('  - 基于插值像素平均 RMSE = %.4f, NRMSE = %.2f%%\n', rmse_interp, nrmse_interp*100);
 
-%% 5.6 计算 RMSE
-fprintf('  正在计算平均化操作引入的误差...\n');
-
-% --- 矢量平均再取模 ---
-J_mag_averaged_expanded_vec = NaN(1, num_triangles);
-valid_tri = triangle_to_pixel_map(:,1) > 0 & triangle_to_pixel_map(:,2) > 0;
-lin_idx   = sub2ind([pixelResolution_N, pixelResolution_N], ...
-                    triangle_to_pixel_map(valid_tri,1), ...
-                    triangle_to_pixel_map(valid_tri,2));
-J_mag_averaged_expanded_vec(valid_tri) = avg_pixel_current_magnitude_vec(lin_idx);
-
-valid = isfinite(J_mag_original(:)) & isfinite(J_mag_averaged_expanded_vec(:));
-rmse_vec  = sqrt(mean((J_mag_original(valid) - J_mag_averaged_expanded_vec(valid)).^2));
-nrmse_vec = rmse_vec / mean(J_mag_original(valid));
-
-% --- 取模后再平均 ---
-J_mag_averaged_expanded_mod = NaN(1, num_triangles);
-J_mag_averaged_expanded_mod(valid_tri) = avg_pixel_current_magnitude_mod(lin_idx);
-
-valid2 = isfinite(J_mag_original(:)) & isfinite(J_mag_averaged_expanded_mod(:));
-rmse_mod  = sqrt(mean((J_mag_original(valid2) - J_mag_averaged_expanded_mod(valid2)).^2));
-nrmse_mod = rmse_mod / mean(J_mag_original(valid2));
-
-%% 输出结果
-fprintf('\n------------------------------------------------------\n');
-fprintf('定量分析结果:\n');
-fprintf('  - 矢量平均再取模: RMSE = %.4f A/m, NRMSE = %.2f%%\n', rmse_vec, nrmse_vec*100);
-fprintf('  - 取模后再平均:   RMSE = %.4f A/m, NRMSE = %.2f%%\n', rmse_mod, nrmse_mod*100);
-fprintf('------------------------------------------------------\n');
-
-% % 5.7 打印误差结果
-% fprintf('\n------------------------------------------------------\n');
-% fprintf('定量分析结果:\n');
-% fprintf('  - 原始电流幅值均值: %.4f A/m\n', mean_original_magnitude);
-% fprintf('  - 均方根误差 (RMSE): %.4f A/m\n', rmse);
-% fprintf('  - 归一化RMSE (NRMSE): %.4f (或 %.2f%%)\n', nrmse, nrmse * 100);
-% fprintf('------------------------------------------------------\n');
-
+%% 输出
 fprintf('\n--- 脚本运行结束 ---\n');
 end
+
