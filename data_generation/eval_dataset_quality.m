@@ -8,7 +8,7 @@ function eval_dataset_quality()
 % 用法：
 %   eval_dataset_quality('dataset_out/antenna_dataset_20251007_123456.h5')
 
-h5path = 'dataset_out/antenna_dataset_20251010_164646.h5';
+h5path = 'dataset_out/antenna_dataset_20251011_222020.h5';
 assert(isfile(h5path), '文件不存在：%s', h5path);
 
 fprintf('读取数据：%s\n', h5path);

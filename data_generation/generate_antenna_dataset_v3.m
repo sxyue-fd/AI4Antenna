@@ -52,19 +52,25 @@ clear; clc; close all;
 %% 0) User Configuration
 % =========================================================================
 % --- 数据集规模配置 ---
-num_optimized_designs_target = 128;  % 目标通过GA生成的"半优化"样本数
-num_random_designs_target    = 1;  % 目标纯随机生成的样本数
+num_optimized_designs_target = 256;  % 目标通过GA生成的"半优化"样本数
+num_random_designs_target    = 256;  % 目标纯随机生成的样本数
 
 % --- GA 半优化配置 ---
 %  总候选=PopulationSize*MaxGenerations，从中选取top-K
 ga_options.PopulationSize = 32;     % 种群大小
-ga_options.Generations    = 16;     % 迭代代数
+ga_options.Generations    = 32;     % 迭代代数
 ga_options.FitnessLimit   = -Inf;   % 适应度函数早停阈值 (例如S11 < -40dB)
 ga_options.StallGenLimit  = 100;    % 如果n代最优解都没变化，则早停
-ga_options.EliteCount     = 1;      % 精英数量
+ga_options.EliteCount     = 2;      % 精英数量
 ga_options.CrossoverFraction = 0.8; % 交叉比例
-ga_options.mutationRate   = 0.02;   % 变异率
+ga_options.mutationRate   = 0.03;   % 变异率
 ga_options.PlotFcn        = @gaplotbestf; % 绘制适应度曲线
+
+% 目标函数fitness = term_s11 - w_bw *num_points_below_10db;
+% w_bw是一个超参数，用于平衡"深度"和"宽度"的重要性。
+% term_s11 的典型值为-20，num_points_below_10db 的典型值为5（5%带宽，0.1GHz间隔）
+% 选择 w_bw = 4 使得带宽奖励的量级与S11项大致相当，更大的值以奖励带宽
+w_bw = 4; 
 
 % --- 天线仿真配置 ---
 pixelResolution_N  = 16;      % 贴片分辨率 (N x N)
@@ -93,7 +99,7 @@ hf_params.meshLambdaFraction = 10; % 更精细的网格
 % --- 低保真仿真参数 (用于GA适应度函数) ---
 lf_params.fmin_GHz     = 8;
 lf_params.fmax_GHz     = 12;
-lf_params.numFreqPoints      = 11;  % 更少的频点以加速
+lf_params.numFreqPoints      = 21;  % 更少的频点以加速
 lf_params.meshLambdaFraction = 5; % 更粗糙的网格以加速
 
 % --- 并行计算配置 ---
@@ -160,7 +166,7 @@ ga_opts = optimoptions('ga', ...
     'OutputFcn', @ga_output_allpop_with_scores);
 
 % 定义适应度函数句柄
-fitness_fcn = @(x) fitness_function_antenna(x, designParams_LF);
+fitness_fcn = @(x) fitness_function_antenna(x, designParams_LF, w_bw);
 
 % 启动计时器
 tic_ga = tic;
@@ -422,7 +428,7 @@ function params = design_antenna_parameters(sim_params, geom, N, overlap_mm)
 end
 
 
-function fitness = fitness_function_antenna(designVector, designParams_LF)
+function fitness = fitness_function_antenna(designVector, designParams_LF, w_bw)
     % GA适应度函数，使用低保真参数进行快速评估
     % --- 解码像素与馈电位置（兼容旧/新两种向量长度）---
     N = designParams_LF.pixelResolution_N;
@@ -465,18 +471,13 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
         s11_db = 20 * log10(abs(s11_complex + eps));
 
         % 使用s11最小值和带宽的组合适应度函数
-        % 1) 原始适应度项：S11最小值 (代表匹配深度)
-        term_s11 = min(s11_db);
+        % 1) 原始适应度项：S11最小值但不低于一个阈值，防止尖峰
+        depth_thr = -20;
+        term_s11 = max(min(s11_db), depth_thr);
         
         % 2) 带宽奖励项：低于-10dB的频点数量 (代表匹配宽度)
         %    我们希望最大化这个数量，因此在cost中它应该是负的奖励
         num_points_below_10db = sum(s11_db < -10);
-
-        % 3) 定义带宽奖励的权重 (w_bw)
-        %    这是一个超参数，用于平衡"深度"和"宽度"的重要性。
-        %    term_s11 的典型值为-30，num_points_below_10db 的典型值为5（5%带宽，0.1GHz间隔）
-        %    选择 w_bw = 6 使得带宽奖励的量级与S11项大致相当。
-        w_bw = 6; 
         
         % 3) 组合适应度函数
         %    我们的目标是最小化cost，所以奖励项要用减法。

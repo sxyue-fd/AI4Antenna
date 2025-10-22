@@ -93,7 +93,7 @@ fprintf('输入阻抗Z = %.2f Ohm\n', Z);
 
 %% 4. 仿真
 fprintf('--- 4. 开始电磁仿真 ---\n');
-mesh(ant, 'MaxEdgeLength', lambda0 / meshLambdaFraction);
+m = mesh(ant, 'MaxEdgeLength', lambda0 / meshLambdaFraction)
 freq_sweep = linspace(f_center*0.9, f_center*1.1, 41);
 s = sparameters(ant, freq_sweep);
 
