@@ -8,7 +8,7 @@ function eval_dataset_quality()
 % 用法：
 %   eval_dataset_quality('dataset_out/antenna_dataset_20251007_123456.h5')
 
-h5path = 'dataset_out/antenna_dataset_20251008_180003.h5';
+h5path = 'dataset_out/antenna_dataset_20251010_164646.h5';
 assert(isfile(h5path), '文件不存在：%s', h5path);
 
 fprintf('读取数据：%s\n', h5path);
@@ -101,6 +101,10 @@ fprintf('满足 min(S11) < -10 dB 的样本比例：%.1f%%\n', 100 * mean(min_db
 
 % 同时，为了避免混淆，修改之前那行的标签
 fprintf('拥有非零-10dB带宽的样本比例：%.1f%%\n', 100*mean(bw10>0));
+counts = feed_map(:);
+p = counts/sum(counts); p = p(p>0);
+H = -sum(p.*log(p)); Hmax = log(numel(feed_map));
+fprintf('Feed分布熵: %.3f (相对 %.1f%%), KL到均匀: %.3f\n', H, 100*H/Hmax, sum(p.*log(p*numel(feed_map))));
 
 % --- 可视化 ---
 [~, ~, ~] = fileparts(h5path);

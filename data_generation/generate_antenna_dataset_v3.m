@@ -53,12 +53,12 @@ clear; clc; close all;
 % =========================================================================
 % --- 数据集规模配置 ---
 num_optimized_designs_target = 128;  % 目标通过GA生成的"半优化"样本数
-num_random_designs_target    = 128;  % 目标纯随机生成的样本数
+num_random_designs_target    = 1;  % 目标纯随机生成的样本数
 
 % --- GA 半优化配置 ---
 %  总候选=PopulationSize*MaxGenerations，从中选取top-K
 ga_options.PopulationSize = 32;     % 种群大小
-ga_options.Generations    = 24;     % 迭代代数
+ga_options.Generations    = 16;     % 迭代代数
 ga_options.FitnessLimit   = -Inf;   % 适应度函数早停阈值 (例如S11 < -40dB)
 ga_options.StallGenLimit  = 100;    % 如果n代最优解都没变化，则早停
 ga_options.EliteCount     = 1;      % 精英数量
@@ -71,9 +71,9 @@ pixelResolution_N  = 16;      % 贴片分辨率 (N x N)
 randomFillFactorRange    = [0.5, 0.9];     % 金属像素填充率范围 [min, max]
 overlap_mm         = 0.2;     % 像素间重叠距离 (mm)
 
-geom.patch_L_mm     = 15;     % 贴片长度 L
-geom.patch_W_mm     = 15;     % 贴片宽度 W
-geom.sub_thick_mm   = 1;      % 介质厚度 h
+geom.patch_L_mm     = 14;     % 贴片长度 L
+geom.patch_W_mm     = 14;     % 贴片宽度 W
+geom.sub_thick_mm   = 2.5;      % 介质厚度 h
 geom.substrate_name= 'Air';   % 介质名，从MATLAB库中选取
 
 geom.board_L_mm     = 30;
@@ -87,14 +87,14 @@ geom.feed_diam_mm   = min(geom.patch_L_mm/pixelResolution_N, ...
 % --- 高保真仿真参数 (用于最终数据集) ---
 hf_params.fmin_GHz     = 8;
 hf_params.fmax_GHz     = 12;
-hf_params.numFreqPoints      = 21;
-hf_params.meshLambdaFraction = 15; % 更精细的网格
+hf_params.numFreqPoints      = 41;
+hf_params.meshLambdaFraction = 10; % 更精细的网格
 
 % --- 低保真仿真参数 (用于GA适应度函数) ---
 lf_params.fmin_GHz     = 8;
 lf_params.fmax_GHz     = 12;
 lf_params.numFreqPoints      = 11;  % 更少的频点以加速
-lf_params.meshLambdaFraction = 7; % 更粗糙的网格以加速
+lf_params.meshLambdaFraction = 5; % 更粗糙的网格以加速
 
 % --- 并行计算配置 ---
 % 0表示使用所有可用worker, 也可以直接指定为cpu物理核数（不要用线程数）, e.g., 32
@@ -474,12 +474,11 @@ function fitness = fitness_function_antenna(designVector, designParams_LF)
 
         % 3) 定义带宽奖励的权重 (w_bw)
         %    这是一个超参数，用于平衡"深度"和"宽度"的重要性。
-        %    term_s11 的范围通常在 [-40, -10]
-        %    num_points_below_10db 的范围在 [0, 21]
-        %    选择 w_bw=1.5 使得带宽奖励的量级与S11项大致相当。
-        w_bw = 5; 
+        %    term_s11 的典型值为-30，num_points_below_10db 的典型值为5（5%带宽，0.1GHz间隔）
+        %    选择 w_bw = 6 使得带宽奖励的量级与S11项大致相当。
+        w_bw = 6; 
         
-        % 4) 组合适应度函数
+        % 3) 组合适应度函数
         %    我们的目标是最小化cost，所以奖励项要用减法。
         fitness = term_s11 - w_bw * num_points_below_10db;
 
@@ -513,8 +512,8 @@ function [state, options, optchanged] = ga_output_allpop_with_scores(options, st
 
     if strcmp(flag, 'iter')
         % 每一代：追加这代的 Population 和 Score
-        all_vecs{end+1}   = state.Population; %#ok<AGROW>
-        all_scores{end+1} = state.Score;      %#ok<AGROW>
+        all_vecs{end+1}   = state.Population; 
+        all_scores{end+1} = state.Score;      
     end
 end
 
