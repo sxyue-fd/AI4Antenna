@@ -25,7 +25,7 @@ testCases = { ...
 };
 
 % --- 负载配置 (与之前相同) ---
-tasksPerWorker_total = 8; % 为最大worker数时，每个worker的目标任务数
+tasksPerWorker_total = 4; % 为最大worker数时，每个worker的目标任务数
 centerFreq_GHz     = 2.4;
 freqSpan_GHz       = 0.4;
 numFreqPoints      = 21;
