@@ -3,7 +3,7 @@ clear; clc; close all;
 
 % 1. 参数设置
 N = 16;             % 网格大小 (16x16)
-correlation_len = 5; % 相关长度 (数值越大，图案越"丝滑"，斑块越大)
+correlation_len = 10; % 相关长度 (数值越大，图案越"丝滑"，斑块越大)
 
 % 2. 构建坐标网格与频率网格
 [X, Y] = meshgrid(1:N, 1:N);
@@ -28,7 +28,8 @@ grf_continuous = (grf_continuous - min(grf_continuous(:))) / (max(grf_continuous
 
 % 7. 二值化处理 (生成 0/1 像素图案)
 % 使用中位数作为阈值可以保证 0 和 1 的比例大致为 50/50
-threshold = median(grf_continuous(:));
+% threshold = median(grf_continuous(:));
+threshold = 0.5;
 grf_binary = grf_continuous > threshold;
 
 % --- 可视化 ---
