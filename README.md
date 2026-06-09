@@ -4,21 +4,21 @@ This project is an actively maintained research and engineering codebase that ap
 
 Key goals
 
-- Provide reproducible scripts to generate antenna datasets (geometries, S-parameters, fields).
+- Provide reproducible scripts to generate antenna datasets (geometries, current distributions, S-parameters, fields).
 
-- Train and evaluate deep learning models for forward prediction (geometry -> performance) and inverse design (spec -> geometry).
+- Train and evaluate forward surrogate models for prediction (geometry -> EM response) and deep generative models for one-shot inverse design (EM response -> current distribution -> geometry).
 
-- Integrate model-driven designs with Antenna Toolbox simulations for verification.
+- Physics-aware design: incorporating current distribution predictions to inject physics knowledge into the inverse design process.
 
-- Benchmark parallel simulation workloads and provide helper utilities for batch experiments.
-
-Repository structure (high level)
+Repository structure
 
 - `pct_benchmark/` — Parallel Computing Toolbox based benchmark and experiment scripts (contains multiple benchmark and optimizer variants).
 
 - `Single_ant/` — Single-antenna examples and small demos (pixelated patch, probe-fed patch, GA-based miniaturization examples).
 
-Note: the repository contains many MATLAB example scripts that use Antenna Toolbox and related toolboxes. Some folders contain generated figures used for documentation and analysis.
+- `CNN-based forward surrogate model/` — Scripts for training and evaluating CNN-based surrogate models for forward prediction.
+
+- `data_generation/` — Scripts for generating datasets of antenna geometries, current distributions, and EM responses.
 
 Requirements
 

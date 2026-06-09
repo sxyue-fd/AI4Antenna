@@ -4,7 +4,7 @@ import os
 from torch.utils.data import DataLoader, Subset
 
 from data.h5_dataset import H5AntennaDataset
-from data.split_loader import load_split_indices
+from data.split_loader import build_split_indices
 from data.preprocess import compute_stats, TargetStandardizer
 
 
@@ -38,9 +38,16 @@ def load_or_compute_standardizer(h5_path, train_indices, force_recompute=False):
 
 def build_dataloaders(cfg, standardizer=None):
     h5_path = cfg["paths"]["h5_path"]
-    split_path = cfg["paths"]["split_mat"]
 
-    split = load_split_indices(split_path)
+    base_dataset = H5AntennaDataset(h5_path, standardizer=None, return_raw=False)
+    split_cfg = cfg.get("split", {})
+    split = build_split_indices(
+        num_samples=len(base_dataset),
+        train_ratio=split_cfg.get("train_ratio", 0.8),
+        val_ratio=split_cfg.get("val_ratio", 0.1),
+        test_ratio=split_cfg.get("test_ratio", 0.1),
+        seed=split_cfg.get("seed", cfg.get("train", {}).get("seed", 42)),
+    )
 
     if standardizer is None:
         force_recompute = cfg.get("preprocess", {}).get("force_recompute_stats", False)
@@ -102,6 +109,12 @@ def build_dataloaders(cfg, standardizer=None):
         "x_shape": train_full_dataset.x_shape,
         "y_shape": train_full_dataset.y_shape,
         "pattern_shape": train_full_dataset.pattern_shape,
+        "num_samples": len(base_dataset),
+        "split_sizes": {
+            "train": len(split["train"]),
+            "val": len(split["val"]),
+            "test": len(split["test"]),
+        },
     }
 
     return {

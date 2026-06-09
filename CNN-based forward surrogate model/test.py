@@ -21,7 +21,7 @@ test.py
     - MATLAB 切分文件
     - 已训练好的 checkpoint
 
-    其中测试数据由 split 文件中的 test_idx 决定。
+    其中测试数据由自动生成的 test split 决定。
 ===============================================================================
 """
 
@@ -50,11 +50,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Test CNN forward proxy model")
 
     parser.add_argument("--h5_path", type=str, default=None, help="HDF5 dataset path")
-    parser.add_argument("--split_mat", type=str, default=None, help="MATLAB split indices path")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path")
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size")
     parser.add_argument("--num_workers", type=int, default=None, help="DataLoader workers")
+    parser.add_argument("--train_ratio", type=float, default=None, help="Train split ratio")
+    parser.add_argument("--val_ratio", type=float, default=None, help="Validation split ratio")
+    parser.add_argument("--test_ratio", type=float, default=None, help="Test split ratio")
     parser.add_argument("--device", type=str, default=None, help="cuda / cpu")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
 

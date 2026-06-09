@@ -14,7 +14,7 @@ infer.py
     6. 打印并可选保存推理结果
 
 说明：
-    本脚本不依赖 split_mat 来重新计算标准化统计量，
+    本脚本不重新计算标准化统计量，
     而是直接使用训练时保存在 checkpoint 中的 standardizer_stats。
 
     若已将 H5AntennaDataset 改为读取“预处理后 HDF5”的版本，

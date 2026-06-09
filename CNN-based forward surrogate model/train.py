@@ -42,20 +42,21 @@ from utils.seed import set_seed
 from utils.io import ensure_dir, save_json
 from utils.logger import create_logger
 from utils.checkpoint import save_checkpoint
-from utils.plot_loss import main as plot_loss_main
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train CNN forward proxy model")
 
     parser.add_argument("--h5_path", type=str, default=None, help="HDF5 dataset path")
-    parser.add_argument("--split_mat", type=str, default=None, help="MATLAB split indices path")
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
     parser.add_argument("--checkpoint_dir", type=str, default=None, help="Checkpoint directory")
 
     parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size")
     parser.add_argument("--num_workers", type=int, default=None, help="DataLoader workers")
+    parser.add_argument("--train_ratio", type=float, default=None, help="Train split ratio")
+    parser.add_argument("--val_ratio", type=float, default=None, help="Validation split ratio")
+    parser.add_argument("--test_ratio", type=float, default=None, help="Test split ratio")
 
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay")
@@ -63,6 +64,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="cuda / cpu")
     parser.add_argument("--resume", type=str, default=None, help="Resume checkpoint path")
+    parser.add_argument("--plot_loss", action="store_true", help="Plot loss curves after training")
     parser.add_argument(
         "--early_stop_patience",
         type=int,
@@ -162,7 +164,6 @@ def main():
         mode="min",
         factor=cfg["scheduler"]["factor"],
         patience=cfg["scheduler"]["patience"],
-        verbose=True,
     )
 
     start_epoch = 0
@@ -227,9 +228,11 @@ def main():
         },
     )
     logger.info("Saved final checkpoint to: %s", final_ckpt_path)
-    logger.info("Plotting loss curves...")
-    plot_loss_main()
-    logger.info("Loss curves saved to outputs/figures/")
+    if args.plot_loss:
+        logger.info("Plotting loss curves...")
+        from utils.plot_loss import main as plot_loss_main
+        plot_loss_main()
+        logger.info("Loss curves saved to outputs/figures/")
 
 
 if __name__ == "__main__":

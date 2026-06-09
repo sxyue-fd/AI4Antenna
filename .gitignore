@@ -13,3 +13,9 @@ dataset_out/
 # Optional: MATLAB temporary and workspace files
 *.mat
 *.mex*
+
+# Python runtime and training artifacts
+__pycache__/
+*.py[cod]
+forward_surrogate/ckpt/*
+!forward_surrogate/ckpt/.gitkeep

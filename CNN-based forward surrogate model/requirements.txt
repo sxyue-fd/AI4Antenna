@@ -10,12 +10,11 @@ pip install -r requirements.txt
 请将数据文件放在：
 
 datasets/your_dataset.h5
-datasets/dataset_split_indices.mat
 
 其中：
 
 your_dataset.h5 是主数据集
-dataset_split_indices.mat 是 MATLAB 划分脚本生成的训练/验证/测试索引文件
+训练/验证/测试索引会根据数据集大小自动生成
 训练
 
 运行训练：
@@ -24,7 +23,7 @@ python train.py
 
 也可以传入自定义参数：
 
-python train.py --h5_path ./datasets/your_dataset.h5 --split_mat ./datasets/dataset_split_indices.mat --epochs 100 --batch_size 64
+python train.py --h5_path ./datasets/your_dataset.h5 --epochs 100 --batch_size 64
 测试
 
 运行测试：
@@ -35,7 +34,7 @@ python test.py
 
 python test.py --checkpoint ./checkpoints/best_model.pt
 默认训练流程
-读取 HDF5 数据集与 MATLAB 划分索引
+读取 HDF5 数据集并自动划分 train / val / test
 构建 train / val / test DataLoader
 用训练集统计目标标准化参数
 构建 Forward Proxy CNN

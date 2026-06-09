@@ -26,21 +26,30 @@ def build_feed_gaussian_map(height, width, feed_y, feed_x, sigma=1.5):
 
 def convert_x_onehot_feed_to_gaussian(x, sigma=1.5):
     x = np.asarray(x, dtype=np.float32)
-    if x.ndim != 3 or x.shape[2] != 2:
-        raise ValueError(f"期望 x.shape=(H,W,2)，实际得到 {x.shape}")
 
-    structure = x[:, :, 0].astype(np.float32)
-    feed_map = x[:, :, 1].astype(np.float32)
+    if x.ndim == 2:
+        encoded = x
+        structure = (encoded > 0.5).astype(np.float32)
+        feed_map = (encoded > 1.5).astype(np.float32)
+    elif x.ndim == 3 and x.shape[2] == 1:
+        encoded = x[:, :, 0]
+        structure = (encoded > 0.5).astype(np.float32)
+        feed_map = (encoded > 1.5).astype(np.float32)
+    elif x.ndim == 3 and x.shape[2] == 2:
+        structure = x[:, :, 0].astype(np.float32)
+        feed_map = x[:, :, 1].astype(np.float32)
+    else:
+        raise ValueError(f"Expected x.shape=(H,W), (H,W,1), or (H,W,2), got {x.shape}")
 
     h, w = structure.shape
 
     feed_indices = np.argwhere(feed_map > 0.5)
 
     if len(feed_indices) == 0:
-        raise ValueError("第二通道未找到馈电点（one-hot 中没有值为1的位置）")
+        raise ValueError("Feed point not found in input X")
 
     if len(feed_indices) > 1:
-        raise ValueError(f"第二通道检测到多个馈电点，数量={len(feed_indices)}，不符合 one-hot 预期")
+        raise ValueError(f"Expected one feed point, got {len(feed_indices)}")
 
     feed_y, feed_x = feed_indices[0]
 
@@ -58,7 +67,7 @@ def convert_x_onehot_feed_to_gaussian(x, sigma=1.5):
 
 def normalize_x(x, sigma=1.5):
     x = convert_x_onehot_feed_to_gaussian(x, sigma=sigma)
-    return np.transpose(x, (2, 0, 1)).astype(np.float32)
+    return np.transpose(x, (2, 1, 0)).astype(np.float32)
 
 
 def normalize_y(y):
@@ -85,18 +94,18 @@ class H5AntennaDataset(Dataset):
 
         with h5py.File(h5_path, "r") as f:
             if "/X" not in f or "/Y" not in f or "/pattern" not in f:
-                raise KeyError("HDF5 必须包含 /X, /Y, /pattern")
+                raise KeyError("HDF5 must contain /X, /Y, and /pattern")
 
             x_ds = f["/X"]
             y_ds = f["/Y"]
             p_ds = f["/pattern"]
 
             if x_ds.ndim != 4:
-                raise ValueError(f"/X 期望 shape=(N,C,H,W)，实际 {x_ds.shape}")
+                raise ValueError(f"/X expected shape=(N,C,H,W), got {x_ds.shape}")
             if y_ds.ndim != 2:
-                raise ValueError(f"/Y 期望 shape=(N,Dy)，实际 {y_ds.shape}")
+                raise ValueError(f"/Y expected shape=(N,Dy), got {y_ds.shape}")
             if p_ds.ndim != 4:
-                raise ValueError(f"/pattern 期望 shape=(N,11,4,120)，实际 {p_ds.shape}")
+                raise ValueError(f"/pattern expected shape=(N,11,4,120), got {p_ds.shape}")
 
             self.n = x_ds.shape[0]
             self.x_shape = tuple(x_ds.shape[1:])

@@ -1,39 +1,64 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-import os
-from scipy.io import loadmat
-import h5py
 
 
-def _flatten(x):
-    return np.asarray(x).reshape(-1)
+def build_split_indices(num_samples, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
+    if num_samples <= 0:
+        raise ValueError(f"num_samples must be positive, got {num_samples}")
 
+    ratios = np.asarray([train_ratio, val_ratio, test_ratio], dtype=np.float64)
+    if np.any(ratios < 0):
+        raise ValueError("split ratios must be non-negative")
 
-def load_split_indices(split_mat_path):
-    if not os.path.isfile(split_mat_path):
-        raise FileNotFoundError(split_mat_path)
+    ratio_sum = ratios.sum()
+    if ratio_sum <= 0:
+        raise ValueError("at least one split ratio must be positive")
 
-    try:
-        data = loadmat(split_mat_path)
-        train_idx = _flatten(data["train_idx"])
-        val_idx = _flatten(data["val_idx"])
-        test_idx = _flatten(data["test_idx"])
-    except NotImplementedError:
-        # MATLAB v7.3
-        with h5py.File(split_mat_path, "r") as f:
-            train_idx = np.array(f["train_idx"]).reshape(-1)
-            val_idx = np.array(f["val_idx"]).reshape(-1)
-            test_idx = np.array(f["test_idx"]).reshape(-1)
+    ratios = ratios / ratio_sum
 
-    def to_zero_based(idx):
-        idx = idx.astype(np.int64)
-        if idx.min() >= 1:
-            idx = idx - 1
-        return idx
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(num_samples).astype(np.int64)
+
+    if num_samples == 1:
+        return {
+            "train": indices,
+            "val": indices[:0],
+            "test": indices[:0],
+        }
+
+    if num_samples == 2:
+        return {
+            "train": indices[:1],
+            "val": indices[:0],
+            "test": indices[1:],
+        }
+
+    n_train = int(num_samples * ratios[0])
+    n_val = int(num_samples * ratios[1])
+
+    if num_samples >= 3:
+        n_train = max(1, n_train)
+        n_val = max(1, n_val)
+        n_test = num_samples - n_train - n_val
+
+        if n_test < 1:
+            shortage = 1 - n_test
+            if n_train >= n_val and n_train > 1:
+                n_train -= shortage
+            elif n_val > 1:
+                n_val -= shortage
+            else:
+                n_train -= shortage
+            n_test = num_samples - n_train - n_val
+    else:
+        n_test = num_samples - n_train - n_val
+
+    train_end = n_train
+    val_end = n_train + n_val
 
     return {
-        "train": to_zero_based(train_idx),
-        "val": to_zero_based(val_idx),
-        "test": to_zero_based(test_idx),
+        "train": indices[:train_end],
+        "val": indices[train_end:val_end],
+        "test": indices[val_end:],
     }

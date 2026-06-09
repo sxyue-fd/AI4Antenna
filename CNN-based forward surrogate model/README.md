@@ -92,8 +92,7 @@ forward_proxy_cnn/
 └── datasets/
     ├── dataset.h5
     ├── dataset.preprocessed.h5
-    ├──dataset.preprocessed.standardizer.pt
-    └── dataset_split_indices.mat
+    └──dataset.preprocessed.standardizer.pt
 ``` 
 
 ## 项目目录介绍
@@ -114,7 +113,7 @@ forward_proxy_cnn/
 
 - split_loader.py
 
-获得训练集，验证集，测试集的id。读取train_idx,val_idx,test_idx索引，并整理为一维数组。将id标号改为从0开始（python）。
+根据数据集样本数和随机种子自动生成训练集、验证集、测试集索引。
 
 - datamodule.py
 
