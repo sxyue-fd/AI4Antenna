@@ -23,8 +23,12 @@ def evaluate_model(
     total_p_loss = 0.0
 
     total_metrics = {
+        "mae": 0.0,
         "y_mae": 0.0,
         "pattern_mae": 0.0,
+        "mse": 0.0,
+        "y_mse": 0.0,
+        "pattern_mse": 0.0,
     }
 
     count = 0

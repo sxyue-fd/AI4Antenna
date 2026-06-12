@@ -23,8 +23,8 @@ def resolve_project_relative_path(path):
 def get_default_config():
     cfg = {
         "paths": {
-            #"h5_path": "./datasets/antenna_dataset_forward_proxy_20260415_232242.h5",
-            "h5_path": project_path("datasets", "antenna_dataset_20260606_161522.h5"),
+            #"h5_path": project_path("datasets", "antenna_dataset_20260606_161522.h5"),
+            "h5_path": project_path("datasets", "antenna_dataset_20260408_150016.h5"),
             "output_dir": project_path("outputs"),
             "checkpoint_dir": project_path("checkpoints"),
             "log_dir": project_path("outputs", "logs"),
@@ -64,7 +64,7 @@ def get_default_config():
         },
 
         "optim": {
-            "lr": 7e-4,
+            "lr": 1e-3,
             "weight_decay": 1e-4,
         },
 
@@ -74,8 +74,8 @@ def get_default_config():
         },
 
         "loss": {
-            "y_weight": 1.0,
-            "p_weight": 1.0,
+            "y_weight": 0.1,
+            "p_weight": 0.9,
         },
 
         "test": {
@@ -84,7 +84,7 @@ def get_default_config():
 
         #增加推理选项
         "inference": {
-            "h5_path": project_path("datasets", "antenna_dataset_20260606_161522.h5"),
+            "h5_path": project_path("datasets", "antenna_dataset_20260408_150016.h5"),
             "checkpoint": project_path("checkpoints", "best_model.pt"),
             "index": 11106,
             "device": "auto",

@@ -31,6 +31,23 @@ class TargetStandardizer:
         p_std = self.p_std.to(p.device)
         return p * p_std + p_mean
 
+    def is_compatible(self, y_shape, p_shape):
+        return (
+            tuple(self.y_mean.shape) == tuple(y_shape)
+            and tuple(self.y_std.shape) == tuple(y_shape)
+            and tuple(self.p_mean.shape) == tuple(p_shape)
+            and tuple(self.p_std.shape) == tuple(p_shape)
+        )
+
+    def validate_shapes(self, y_shape, p_shape):
+        if not self.is_compatible(y_shape, p_shape):
+            raise ValueError(
+                "Standardizer target shape mismatch: "
+                f"expected y={tuple(y_shape)}, pattern={tuple(p_shape)}, "
+                f"got y_mean={tuple(self.y_mean.shape)}, p_mean={tuple(self.p_mean.shape)}. "
+                "Recompute stats or use a checkpoint trained on this dataset."
+            )
+
     def state_dict(self):
         return {
             "y_mean": self.y_mean.detach().cpu(),

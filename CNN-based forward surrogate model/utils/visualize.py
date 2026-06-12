@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
-
-import matplotlib.pyplot as plt
 import os
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -19,10 +23,20 @@ def plot_s11(y_true, y_pred, save_path=None, title="S11 Prediction"):
     plt.close()
 
 
+def default_pattern_freq_indices(fp):
+    if fp <= 0:
+        return []
+    if fp == 1:
+        return [0]
+    if fp == 2:
+        return [0, 1]
+    return sorted({0, int(round((fp - 1) / 2)), fp - 1})
+
+
 def plot_pattern_slice(
         p_true,
         p_pred,
-        freq_step=5,
+        freq_indices=None,
         save_dir=None
 ):
     """
@@ -36,7 +50,8 @@ def plot_pattern_slice(
         P : 极化数（这里默认4个）
         T : 角度采样点
 
-        freq_step: 频点间隔
+        freq_indices: optional frequency indices. None means 8/10/12 GHz
+            for uniformly sampled 8-12 GHz pattern data.
         save_dir : 保存目录
     """
 
@@ -50,8 +65,12 @@ def plot_pattern_slice(
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
 
-    # 每隔5个频点画一次
-    for freq_idx in range(0, Fp, freq_step):
+    if freq_indices is None:
+        freq_indices = default_pattern_freq_indices(Fp)
+    else:
+        freq_indices = sorted({int(i) for i in freq_indices if 0 <= int(i) < Fp})
+
+    for freq_idx in freq_indices:
 
         # 2x2 子图，对应4个极化
         fig, axes = plt.subplots(
@@ -119,6 +138,5 @@ def save_prediction_example(output_dir, sample_idx, y_true, y_pred, p_true, p_pr
     plot_pattern_slice(
         p_true,
         p_pred,
-        freq_step=5,
         save_dir=os.path.join(output_dir, f"pattern_{sample_idx}"),
     )

@@ -5,12 +5,53 @@ import os
 import h5py
 import numpy as np
 
-from data.h5_dataset import normalize_x, normalize_y, normalize_pattern
+from data.h5_dataset import H5AntennaDataset, read_h5_dataset_info
 
 
 def get_preprocessed_h5_path(src_h5_path):
     base, ext = os.path.splitext(src_h5_path)
     return f"{base}.preprocessed{ext}"
+
+
+def _shape_to_attr(shape):
+    return np.asarray(shape, dtype=np.int64)
+
+
+def _expected_preprocessed_shapes(src_h5_path):
+    info = read_h5_dataset_info(src_h5_path)
+    return {
+        "X": (info["num_samples"], *info["x_shape"]),
+        "Y": (info["num_samples"], *info["y_shape"]),
+        "pattern": (info["num_samples"], *info["pattern_shape"]),
+    }
+
+
+def _preprocessed_h5_matches_source(src_h5_path, dst_h5_path):
+    if not os.path.isfile(dst_h5_path):
+        return False
+
+    expected = _expected_preprocessed_shapes(src_h5_path)
+    try:
+        with h5py.File(dst_h5_path, "r") as f_dst:
+            if not bool(f_dst.attrs.get("preprocessed", False)):
+                return False
+            for name, shape in expected.items():
+                if name not in f_dst or tuple(f_dst[name].shape) != tuple(shape):
+                    return False
+    except OSError:
+        return False
+
+    return True
+
+
+def _copy_optional_metadata(f_src, f_dst):
+    for name in ("freq_hz", "pattern_freq_hz", "pattern_theta_deg"):
+        if name in f_src and name not in f_dst:
+            f_src.copy(name, f_dst)
+
+    for key in ("meta_json", "num_samples"):
+        if key in f_src.attrs:
+            f_dst.attrs[key] = f_src.attrs[key]
 
 
 def build_preprocessed_h5(src_h5_path, dst_h5_path, feed_sigma=1.5, compression="lzf"):
@@ -19,72 +60,77 @@ def build_preprocessed_h5(src_h5_path, dst_h5_path, feed_sigma=1.5, compression=
 
     os.makedirs(os.path.dirname(dst_h5_path) or ".", exist_ok=True)
 
-    with h5py.File(src_h5_path, "r") as f_src:
-        if "/X" not in f_src or "/Y" not in f_src or "/pattern" not in f_src:
-            raise KeyError("源 HDF5 必须包含 /X, /Y, /pattern")
+    src_info = read_h5_dataset_info(src_h5_path)
+    if src_info["layout"] == "preprocessed":
+        raise ValueError(f"Source HDF5 is already preprocessed: {src_h5_path}")
 
-        x_src = f_src["/X"]           # (H, W, 2, N)
-        y_src = f_src["/Y"]           # (41, N)
-        p_src = f_src["/pattern"]     # (120, 4, 11, N)
+    dataset = H5AntennaDataset(src_h5_path, standardizer=None, feed_sigma=feed_sigma, return_raw=False)
+    n = len(dataset)
+    x0, y0, p0, _ = dataset[0]
+    x0 = x0.numpy().astype(np.float32)
+    y0 = y0.numpy().astype(np.float32)
+    p0 = p0.numpy().astype(np.float32)
 
-        n = x_src.shape[-1]
+    x_chunk = min(128, n)
+    y_chunk = min(1024, n)
+    p_chunk = min(64, n)
 
-        x0 = normalize_x(x_src[:, :, :, 0], sigma=feed_sigma)   # (2,16,16)
-        y0 = normalize_y(y_src[:, 0])                           # (41,)
-        p0 = normalize_pattern(p_src[:, :, :, 0])               # (11,4,120)
+    with h5py.File(src_h5_path, "r") as f_src, h5py.File(dst_h5_path, "w") as f_dst:
+        _copy_optional_metadata(f_src, f_dst)
 
-        x_chunk = min(128, n)
-        y_chunk = min(1024, n)
-        p_chunk = min(64, n)
+        x_dst = f_dst.create_dataset(
+            "X",
+            shape=(n, *x0.shape),
+            dtype=np.float32,
+            compression=compression,
+            chunks=(x_chunk, *x0.shape),
+        )
+        y_dst = f_dst.create_dataset(
+            "Y",
+            shape=(n, *y0.shape),
+            dtype=np.float32,
+            compression=compression,
+            chunks=(y_chunk, *y0.shape),
+        )
+        p_dst = f_dst.create_dataset(
+            "pattern",
+            shape=(n, *p0.shape),
+            dtype=np.float32,
+            compression=compression,
+            chunks=(p_chunk, *p0.shape),
+        )
 
-        with h5py.File(dst_h5_path, "w") as f_dst:
-            x_dst = f_dst.create_dataset(
-                "X",
-                shape=(n, *x0.shape),
-                dtype=np.float32,
-                compression=compression,
-                chunks=(x_chunk, *x0.shape),
-            )
-            y_dst = f_dst.create_dataset(
-                "Y",
-                shape=(n, *y0.shape),
-                dtype=np.float32,
-                compression=compression,
-                chunks=(y_chunk, *y0.shape),
-            )
-            p_dst = f_dst.create_dataset(
-                "pattern",
-                shape=(n, *p0.shape),
-                dtype=np.float32,
-                compression=compression,
-                chunks=(p_chunk, *p0.shape),
-            )
+        f_dst.attrs["preprocessed"] = True
+        f_dst.attrs["feed_sigma"] = float(feed_sigma)
+        f_dst.attrs["x_layout"] = "NCHW"
+        f_dst.attrs["y_layout"] = "N,F"
+        f_dst.attrs["pattern_layout"] = "N,Fp,P,T"
+        f_dst.attrs["source_layout"] = src_info["layout"]
+        f_dst.attrs["source_x_shape"] = _shape_to_attr(src_info["source_shapes"]["X"])
+        f_dst.attrs["source_y_shape"] = _shape_to_attr(src_info["source_shapes"]["Y"])
+        f_dst.attrs["source_pattern_shape"] = _shape_to_attr(src_info["source_shapes"]["pattern"])
+        f_dst.attrs["x_chunk"] = x_chunk
+        f_dst.attrs["y_chunk"] = y_chunk
+        f_dst.attrs["p_chunk"] = p_chunk
 
-            f_dst.attrs["preprocessed"] = True
-            f_dst.attrs["feed_sigma"] = float(feed_sigma)
-            f_dst.attrs["x_layout"] = "NCHW"
-            f_dst.attrs["y_layout"] = "N,D"
-            f_dst.attrs["pattern_layout"] = "N,11,4,120"
-            f_dst.attrs["x_chunk"] = x_chunk
-            f_dst.attrs["y_chunk"] = y_chunk
-            f_dst.attrs["p_chunk"] = p_chunk
+        for i in range(n):
+            x, y, p, _ = dataset[i]
+            x_dst[i] = x.numpy().astype(np.float32)
+            y_dst[i] = y.numpy().astype(np.float32)
+            p_dst[i] = p.numpy().astype(np.float32)
 
-            for i in range(n):
-                x = normalize_x(x_src[:, :, :, i], sigma=feed_sigma)
-                y = normalize_y(y_src[:, i])
-                p = normalize_pattern(p_src[:, :, :, i])
-
-                x_dst[i] = x
-                y_dst[i] = y
-                p_dst[i] = p
-
-                if (i + 1) % 1000 == 0 or (i + 1) == n:
-                    print(f"[preprocess] [{i + 1}/{n}] done")
+            if (i + 1) % 1000 == 0 or (i + 1) == n:
+                print(f"[preprocess] [{i + 1}/{n}] done")
 
     print(f"[preprocess] Saved to: {dst_h5_path}")
 
 
 def ensure_preprocessed_h5(src_h5_path, feed_sigma=1.5, compression="lzf", force=False):
+    src_info = read_h5_dataset_info(src_h5_path)
+    if src_info["layout"] == "preprocessed":
+        print(f"[preprocess] source already preprocessed: {src_h5_path}")
+        return src_h5_path
+
     dst_h5_path = get_preprocessed_h5_path(src_h5_path)
 
     need_build = force or (not os.path.isfile(dst_h5_path))
@@ -95,6 +141,10 @@ def ensure_preprocessed_h5(src_h5_path, feed_sigma=1.5, compression="lzf", force
         if src_mtime > dst_mtime:
             print("[preprocess] source h5 is newer, rebuilding preprocessed h5...")
             need_build = True
+
+    if not need_build and not _preprocessed_h5_matches_source(src_h5_path, dst_h5_path):
+        print("[preprocess] cached preprocessed h5 shape does not match source, rebuilding...")
+        need_build = True
 
     if need_build:
         print("[preprocess] building preprocessed h5...")

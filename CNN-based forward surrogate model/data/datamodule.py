@@ -13,16 +13,20 @@ def get_standardizer_cache_path(h5_path):
     return f"{base}.standardizer.pt"
 
 
-def load_or_compute_standardizer(h5_path, train_indices, force_recompute=False):
+def load_or_compute_standardizer(h5_path, train_indices, y_shape, pattern_shape, force_recompute=False):
     stats_path = get_standardizer_cache_path(h5_path)
 
     if (not force_recompute) and os.path.isfile(stats_path):
         print(f"[standardizer] load cached stats from: {stats_path}")
-        return TargetStandardizer.load(stats_path)
+        standardizer = TargetStandardizer.load(stats_path)
+        if standardizer.is_compatible(y_shape, pattern_shape):
+            return standardizer
+        print("[standardizer] cached stats shape mismatch, recomputing...")
 
     print("[standardizer] computing stats from training split...")
     base_dataset = H5AntennaDataset(h5_path, standardizer=None, return_raw=False)
     standardizer = compute_stats(base_dataset, train_indices)
+    standardizer.validate_shapes(y_shape, pattern_shape)
 
     standardizer.save(
         stats_path,
@@ -54,8 +58,12 @@ def build_dataloaders(cfg, standardizer=None):
         standardizer = load_or_compute_standardizer(
             h5_path=h5_path,
             train_indices=split["train"],
+            y_shape=base_dataset.y_shape,
+            pattern_shape=base_dataset.pattern_shape,
             force_recompute=force_recompute,
         )
+    else:
+        standardizer.validate_shapes(base_dataset.y_shape, base_dataset.pattern_shape)
 
     train_full_dataset = H5AntennaDataset(
         h5_path,
@@ -106,9 +114,11 @@ def build_dataloaders(cfg, standardizer=None):
     )
 
     dataset_info = {
+        "layout": train_full_dataset.layout,
         "x_shape": train_full_dataset.x_shape,
         "y_shape": train_full_dataset.y_shape,
         "pattern_shape": train_full_dataset.pattern_shape,
+        "pattern_metadata": train_full_dataset.pattern_metadata,
         "num_samples": len(base_dataset),
         "split_sizes": {
             "train": len(split["train"]),

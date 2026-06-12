@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import json
 import h5py
 import numpy as np
 import torch
@@ -78,7 +79,113 @@ def normalize_y(y):
 
 
 def normalize_pattern(p):
+    p = np.asarray(p, dtype=np.float32)
+    if p.ndim != 3:
+        raise ValueError(f"Expected pattern sample shape=(T,P,Fp), got {p.shape}")
     return np.transpose(p, (2, 1, 0)).astype(np.float32)
+
+
+def _attr_is_true(value):
+    if isinstance(value, np.ndarray):
+        value = value.item()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        return value.lower() in {"true", "1", "yes"}
+    return bool(value)
+
+
+def _read_meta_json(f):
+    raw = f.attrs.get("meta_json")
+    if raw is None:
+        return {}
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    if isinstance(raw, np.ndarray):
+        raw = raw.item()
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def infer_h5_layout(f):
+    """Infer dataset layout without assuming a fixed number of pattern frequencies."""
+    x_ds = f["/X"]
+    y_ds = f["/Y"]
+    p_ds = f["/pattern"]
+
+    if x_ds.ndim != 4:
+        raise ValueError(f"/X expected 4 dimensions, got {x_ds.shape}")
+    if y_ds.ndim != 2:
+        raise ValueError(f"/Y expected 2 dimensions, got {y_ds.shape}")
+    if p_ds.ndim != 4:
+        raise ValueError(f"/pattern expected 4 dimensions, got {p_ds.shape}")
+
+    is_marked_preprocessed = _attr_is_true(f.attrs.get("preprocessed", False))
+    looks_preprocessed = (
+        x_ds.shape[0] == y_ds.shape[0] == p_ds.shape[0]
+        and x_ds.shape[1] in (1, 2)
+    )
+    looks_matlab_raw = x_ds.shape[-1] == y_ds.shape[-1] == p_ds.shape[-1]
+
+    if is_marked_preprocessed or looks_preprocessed:
+        return {
+            "kind": "preprocessed",
+            "num_samples": int(x_ds.shape[0]),
+            "x_shape": tuple(int(v) for v in x_ds.shape[1:]),
+            "y_shape": tuple(int(v) for v in y_ds.shape[1:]),
+            "pattern_shape": tuple(int(v) for v in p_ds.shape[1:]),
+            "source_shapes": {
+                "X": tuple(int(v) for v in x_ds.shape),
+                "Y": tuple(int(v) for v in y_ds.shape),
+                "pattern": tuple(int(v) for v in p_ds.shape),
+            },
+        }
+
+    if looks_matlab_raw:
+        h, w, _c, n = x_ds.shape
+        t, p, fp, _ = p_ds.shape
+        return {
+            "kind": "matlab_raw",
+            "num_samples": int(n),
+            "x_shape": (2, int(w), int(h)),
+            "y_shape": (int(y_ds.shape[0]),),
+            "pattern_shape": (int(fp), int(p), int(t)),
+            "source_shapes": {
+                "X": tuple(int(v) for v in x_ds.shape),
+                "Y": tuple(int(v) for v in y_ds.shape),
+                "pattern": tuple(int(v) for v in p_ds.shape),
+            },
+        }
+
+    raise ValueError(
+        "Could not infer HDF5 layout. Expected either preprocessed "
+        "(N,C,H,W)/(N,F)/(N,Fp,P,T) or MATLAB raw "
+        "(H,W,C,N)/(F,N)/(T,P,Fp,N); got "
+        f"X={x_ds.shape}, Y={y_ds.shape}, pattern={p_ds.shape}"
+    )
+
+
+def read_h5_dataset_info(h5_path):
+    with h5py.File(h5_path, "r") as f:
+        for key in ("/X", "/Y", "/pattern"):
+            if key not in f:
+                raise KeyError(f"HDF5 must contain {key}")
+
+        layout = infer_h5_layout(f)
+        meta = _read_meta_json(f)
+        pattern_meta = meta.get("pattern", {}) if isinstance(meta, dict) else {}
+
+        return {
+            "layout": layout["kind"],
+            "num_samples": layout["num_samples"],
+            "x_shape": layout["x_shape"],
+            "y_shape": layout["y_shape"],
+            "pattern_shape": layout["pattern_shape"],
+            "source_shapes": layout["source_shapes"],
+            "pattern_metadata": pattern_meta,
+        }
 
 
 class H5AntennaDataset(Dataset):
@@ -96,21 +203,17 @@ class H5AntennaDataset(Dataset):
             if "/X" not in f or "/Y" not in f or "/pattern" not in f:
                 raise KeyError("HDF5 must contain /X, /Y, and /pattern")
 
-            x_ds = f["/X"]
-            y_ds = f["/Y"]
-            p_ds = f["/pattern"]
+            layout = infer_h5_layout(f)
+            meta = _read_meta_json(f)
+            pattern_meta = meta.get("pattern", {}) if isinstance(meta, dict) else {}
 
-            if x_ds.ndim != 4:
-                raise ValueError(f"/X expected shape=(N,C,H,W), got {x_ds.shape}")
-            if y_ds.ndim != 2:
-                raise ValueError(f"/Y expected shape=(N,Dy), got {y_ds.shape}")
-            if p_ds.ndim != 4:
-                raise ValueError(f"/pattern expected shape=(N,11,4,120), got {p_ds.shape}")
-
-            self.n = x_ds.shape[0]
-            self.x_shape = tuple(x_ds.shape[1:])
-            self.y_shape = tuple(y_ds.shape[1:])
-            self.pattern_shape = tuple(p_ds.shape[1:])
+            self.layout = layout["kind"]
+            self.n = layout["num_samples"]
+            self.x_shape = layout["x_shape"]
+            self.y_shape = layout["y_shape"]
+            self.pattern_shape = layout["pattern_shape"]
+            self.source_shapes = layout["source_shapes"]
+            self.pattern_metadata = pattern_meta
 
     def _open(self):
         if self._h5 is None:
@@ -122,9 +225,16 @@ class H5AntennaDataset(Dataset):
     def __getitem__(self, idx):
         self._open()
 
-        x = self._h5["/X"][idx]
-        y = self._h5["/Y"][idx]
-        p = self._h5["/pattern"][idx]
+        if self.layout == "preprocessed":
+            x = self._h5["/X"][idx]
+            y = self._h5["/Y"][idx]
+            p = self._h5["/pattern"][idx]
+        elif self.layout == "matlab_raw":
+            x = normalize_x(self._h5["/X"][:, :, :, idx], sigma=self.feed_sigma)
+            y = normalize_y(self._h5["/Y"][:, idx])
+            p = normalize_pattern(self._h5["/pattern"][:, :, :, idx])
+        else:
+            raise RuntimeError(f"Unsupported HDF5 layout: {self.layout}")
 
         x = torch.from_numpy(np.asarray(x, dtype=np.float32))
         y = torch.from_numpy(np.asarray(y, dtype=np.float32))

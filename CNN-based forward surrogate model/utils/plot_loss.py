@@ -1,86 +1,91 @@
 # -*- coding: utf-8 -*-
 
 import os
-import pandas as pd
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import matplotlib
 
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
-def plot_main_loss(df, save_path=None):
-    plt.figure(figsize=(8, 5))
-    plt.plot(df["epoch"], df["train_loss"], label="Train Loss")
-    plt.plot(df["epoch"], df["val_loss"], label="Val Loss")
-
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training / Validation Loss")
-    plt.legend()
-    plt.grid(True)
-
-    if save_path is not None:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    
-    if save_path is None:
-        plt.show()
-
-    plt.close()
+def _plot_if_present(ax, df, column, label):
+    if column in df.columns:
+        run_ids = (df["epoch"].diff().fillna(1) <= 0).cumsum()
+        for run_id, run_df in df.groupby(run_ids):
+            run_label = label if run_id == 0 else f"{label} (run {run_id + 1})"
+            ax.plot(run_df["epoch"], run_df[column], label=run_label)
 
 
-def plot_sub_losses(df, save_path=None):
-    plt.figure(figsize=(8, 5))
-    plt.plot(df["epoch"], df["train_y_loss"], label="Train Y Loss")
-    plt.plot(df["epoch"], df["val_y_loss"], label="Val Y Loss")
-    plt.plot(df["epoch"], df["train_p_loss"], label="Train Pattern Loss")
-    plt.plot(df["epoch"], df["val_p_loss"], label="Val Pattern Loss")
-
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Y Loss / Pattern Loss")
-    plt.legend()
-    plt.grid(True)
-
-    if save_path is not None:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    
-    if save_path is None:
-        plt.show()
-
-    plt.close()
+def _plot_first_present(ax, df, columns, label):
+    for column in columns:
+        if column in df.columns:
+            _plot_if_present(ax, df, column, label)
+            return
 
 
-def main():
-    csv_path = "./outputs/logs/train_log.csv"
-
+def plot_training_metrics(csv_path, save_path):
     if not os.path.isfile(csv_path):
-        raise FileNotFoundError(f"未找到训练日志文件: {csv_path}")
+        raise FileNotFoundError(f"Training log not found: {csv_path}")
 
     df = pd.read_csv(csv_path)
-
     if "epoch" not in df.columns:
-        raise ValueError("CSV 中缺少 epoch 列。")
+        raise ValueError("CSV must contain an epoch column")
 
-    plot_main_loss(
-        df,
-        save_path="./outputs/figures/loss_curve.png",
-    )
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
 
-    required_sub_cols = {
-        "train_y_loss", "val_y_loss", "train_p_loss", "val_p_loss"
-    }
-    if required_sub_cols.issubset(set(df.columns)):
-        plot_sub_losses(
-            df,
-            save_path="./outputs/figures/sub_loss_curve.png",
-        )
-    else:
-        print("CSV 中未找到完整的子损失列，跳过子损失绘图。")
+    ax = axes[0]
+    _plot_if_present(ax, df, "train_loss", "Train Loss")
+    _plot_if_present(ax, df, "val_loss", "Val Loss")
+    ax.set_title("Loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    ax = axes[1]
+    _plot_if_present(ax, df, "train_y_loss", "Train Y Loss")
+    _plot_first_present(ax, df, ["train_p_loss", "train_pattern_loss"], "Train P Loss")
+    _plot_if_present(ax, df, "val_y_loss", "Val Y Loss")
+    _plot_first_present(ax, df, ["val_p_loss", "val_pattern_loss"], "Val P Loss")
+    ax.set_title("Sub Loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    ax = axes[2]
+    _plot_if_present(ax, df, "val_mae", "Val MAE")
+    _plot_if_present(ax, df, "val_y_mae", "Val Y MAE")
+    _plot_if_present(ax, df, "val_pattern_mae", "Val Pattern MAE")
+    ax.set_title("Validation MAE")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("MAE")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    ax = axes[3]
+    _plot_if_present(ax, df, "val_mse", "Val MSE")
+    _plot_if_present(ax, df, "val_y_mse", "Val Y MSE")
+    _plot_if_present(ax, df, "val_pattern_mse", "Val Pattern MSE")
+    ax.set_title("Validation MSE")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("MSE")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    fig.savefig(save_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
+def main(csv_path="./outputs/logs/train_log.csv", save_path="./outputs/figures/training_metrics.png"):
+    plot_training_metrics(csv_path=csv_path, save_path=save_path)
 
 
 if __name__ == "__main__":

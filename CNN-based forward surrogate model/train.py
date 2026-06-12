@@ -2,25 +2,7 @@
 """
 train.py
 ===============================================================================
-用途：
-    训练基于 CNN 的前向代理模型。
-
-任务：
-    输入：像素化天线结构 + 馈电位置
-    输出：S11 频响 + 方向图
-
-本文件职责：
-    1. 解析命令行参数
-    2. 读取默认配置
-    3. 构建数据集与 DataLoader
-    4. 构建模型、损失函数、优化器、学习率调度器
-    5. 调用训练器完成训练
-    6. 保存最佳模型与最终模型
-
-注意：
-    本文件只作为项目入口，不承载底层实现细节。
-    具体的数据读取、模型定义、训练循环、日志记录等功能，
-    由项目内其他模块分别负责。
+Train the CNN forward surrogate model.
 ===============================================================================
 """
 
@@ -42,6 +24,8 @@ from utils.seed import set_seed
 from utils.io import ensure_dir, save_json
 from utils.logger import create_logger
 from utils.checkpoint import save_checkpoint
+from utils.run_dirs import configure_train_run_dirs
+from utils.model_compat import validate_checkpoint_dataset_shapes
 
 
 def parse_args():
@@ -64,7 +48,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="cuda / cpu")
     parser.add_argument("--resume", type=str, default=None, help="Resume checkpoint path")
-    parser.add_argument("--plot_loss", action="store_true", help="Plot loss curves after training")
+    parser.add_argument("--no_plot", action="store_true", help="Disable training metric plot output")
     parser.add_argument(
         "--early_stop_patience",
         type=int,
@@ -80,6 +64,19 @@ def main():
 
     cfg = get_default_config()
     cfg = update_config_from_args(cfg, args)
+
+    resume_checkpoint = None
+    if cfg["train"]["resume"] is not None:
+        resume_path = cfg["train"]["resume"]
+        if not os.path.isfile(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        resume_checkpoint = torch.load(resume_path, map_location="cpu")
+
+    cfg = configure_train_run_dirs(
+        cfg=cfg,
+        resume_checkpoint=resume_checkpoint,
+        resume_path=cfg["train"]["resume"],
+    )
 
     ensure_dir(cfg["paths"]["output_dir"])
     ensure_dir(cfg["paths"]["checkpoint_dir"])
@@ -171,11 +168,10 @@ def main():
 
     if cfg["train"]["resume"] is not None:
         resume_path = cfg["train"]["resume"]
-        if not os.path.isfile(resume_path):
-            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
 
         logger.info("Resuming from checkpoint: %s", resume_path)
         checkpoint = torch.load(resume_path, map_location=device)
+        validate_checkpoint_dataset_shapes(checkpoint, dataset_info, context="Resume checkpoint")
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -225,14 +221,23 @@ def main():
                 "p_mean": standardizer.p_mean.detach().cpu(),
                 "p_std": standardizer.p_std.detach().cpu(),
             },
+            "run_id": cfg["paths"].get("run_id"),
+            "run_dir": cfg["paths"].get("run_dir"),
+            "output_root": cfg["paths"].get("output_root"),
         },
     )
     logger.info("Saved final checkpoint to: %s", final_ckpt_path)
-    if args.plot_loss:
-        logger.info("Plotting loss curves...")
-        from utils.plot_loss import main as plot_loss_main
-        plot_loss_main()
-        logger.info("Loss curves saved to outputs/figures/")
+
+    if not args.no_plot:
+        try:
+            from utils.plot_loss import plot_training_metrics
+
+            csv_path = os.path.join(cfg["paths"]["log_dir"], "train_log.csv")
+            figure_path = os.path.join(cfg["paths"]["output_dir"], "figures", "training_metrics.png")
+            plot_training_metrics(csv_path=csv_path, save_path=figure_path)
+            logger.info("Saved training metric plot to: %s", figure_path)
+        except Exception as exc:
+            logger.warning("Failed to plot training metrics: %s", exc)
 
 
 if __name__ == "__main__":

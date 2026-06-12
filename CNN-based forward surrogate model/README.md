@@ -39,9 +39,10 @@
 
 - 方向图张量
 - 通常：
-  - `Fp = 11`
+  - `Fp` is read from the HDF5 file automatically (`11` in older datasets, `5` in new 8-12 GHz / 1 GHz-step datasets)
   - `P = 4`
   - `T = 120`
+  - New gain datasets store linear gain magnitude in `/pattern`.
 
 ---
 

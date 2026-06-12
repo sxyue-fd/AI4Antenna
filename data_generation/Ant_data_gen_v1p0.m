@@ -1,8 +1,8 @@
-function Ant_data_gen_v1p0_mini()
-% Ant_data_gen_v1p0_mini.m
+function Ant_data_gen_v1p0()
+% Ant_data_gen_v1p0.m
 % =========================================================================
 % 描述：
-%   像素化贴片天线数据集生成脚本（调试版）。
+%   像素化贴片天线数据集生成脚本（单一仿真版本，进一步精简）。
 %
 %   1) 只保留一套仿真参数 sim_params
 %   2) 不手动指定网格，让软件在求解时自动生成网格
@@ -24,8 +24,8 @@ function Ant_data_gen_v1p0_mini()
 clear; clc; close all;
 
 %% 0) User Configuration
-num_top_per_feed             = 1;%每个馈电点保留样本数
-num_random_designs_target    = 100;%随机产生的样本数
+num_top_per_feed             = 300;%每个馈电点保留样本数
+num_random_designs_target    = 36000;%随机产生的样本数
 
 pixelResolution_N            = 16;%像素分辨率
 randomFillFactorRange        = [0.30, 0.50];%形态学操作前的填充率范围
@@ -55,7 +55,7 @@ sim_params.pattern_step_GHz   = 1;
 sim_params.pattern_theta_deg  = 1:3:360;   
 sim_params.pattern_phi_xoz    = 0;         % XOZ 平面
 sim_params.pattern_phi_yoz    = 90;        % YOZ 平面
-num_workers_to_use           = 32;
+num_workers_to_use           = 64;
 restart_every_feeds          = 32;%每32个馈电点重启一次并行池（后未用）
 restart_every_rand_batches   = 40;
 random_batch_size            = 512;
@@ -66,9 +66,9 @@ ts = string(datetime("now","Format","yyyyMMdd_HHmmss"));
 dataset_filename = fullfile(output_dir, "antenna_dataset_" + ts + ".h5");
 %优化阶段参数
 cfg = struct();
-cfg.init_pool_size        = 2;
-cfg.num_iters             = 3;
-cfg.children_per_iter     = 2;
+cfg.init_pool_size        = 500;
+cfg.num_iters             = 15;
+cfg.children_per_iter     = 200;
 cfg.keep_size             = 5000;
 
 cfg.beta                  = 0.18;
@@ -1185,25 +1185,25 @@ pattern_data = zeros(Fp, 4, T, 'single');
 for kf = 1:Fp
     f_pat = designParams.pattern_freqs(kf);
 
-    % XOZ, Etheta
-    pat_xoz_eth = pattern(ant, f_pat, designParams.pattern_phi_xoz, theta_deg, ...
-        'Type', 'efield', 'Polarization', 'V');
-    pattern_data(kf, 1, :) = single(abs(pat_xoz_eth(:)));
+    % XOZ, Gaintheta
+    pat_xoz_gth = pattern(ant, f_pat, designParams.pattern_phi_xoz, theta_deg, ...
+        'Type', 'gain', 'Polarization', 'V');
+    pattern_data(kf, 1, :) = single(10.^(pat_xoz_gth(:) / 10));
 
-    % XOZ, Ephi
-    pat_xoz_eph = pattern(ant, f_pat, designParams.pattern_phi_xoz, theta_deg, ...
-        'Type', 'efield', 'Polarization', 'H');
-    pattern_data(kf, 2, :) = single(abs(pat_xoz_eph(:)));
+    % XOZ, Gainphi
+    pat_xoz_gph = pattern(ant, f_pat, designParams.pattern_phi_xoz, theta_deg, ...
+        'Type', 'gain', 'Polarization', 'H');
+    pattern_data(kf, 2, :) = single(10.^(pat_xoz_gph(:) / 10));
 
-    % YOZ, Etheta
-    pat_yoz_eth = pattern(ant, f_pat, designParams.pattern_phi_yoz, theta_deg, ...
-        'Type', 'efield', 'Polarization', 'V');
-    pattern_data(kf, 3, :) = single(abs(pat_yoz_eth(:)));
+    % YOZ, Gaintheta
+    pat_yoz_gth = pattern(ant, f_pat, designParams.pattern_phi_yoz, theta_deg, ...
+        'Type', 'gain', 'Polarization', 'V');
+    pattern_data(kf, 3, :) = single(10.^(pat_yoz_gth(:) / 10));
 
-    % YOZ, Ephi
-    pat_yoz_eph = pattern(ant, f_pat, designParams.pattern_phi_yoz, theta_deg, ...
-        'Type', 'efield', 'Polarization', 'H');
-    pattern_data(kf, 4, :) = single(abs(pat_yoz_eph(:)));
+    % YOZ, Gainphi
+    pat_yoz_gph = pattern(ant, f_pat, designParams.pattern_phi_yoz, theta_deg, ...
+        'Type', 'gain', 'Polarization', 'H');
+    pattern_data(kf, 4, :) = single(10.^(pat_yoz_gph(:) / 10));
 end
 end
 

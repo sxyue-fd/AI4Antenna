@@ -39,6 +39,8 @@ from data.h5_dataset import H5AntennaDataset
 from data.preprocess import TargetStandardizer
 from models.forward_proxy_net import build_forward_proxy_model
 from utils.visualize import save_prediction_example
+from utils.run_dirs import configure_eval_output_dir, find_latest_train_checkpoint
+from utils.model_compat import validate_checkpoint_dataset_shapes
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Inference for CNN forward proxy model")
@@ -90,7 +92,6 @@ def main():
     checkpoint_path = args.checkpoint or infer_cfg["checkpoint"]
     index = args.index if args.index is not None else infer_cfg["index"]
     device_name = args.device or infer_cfg["device"]
-    save_dir = args.save_dir or infer_cfg["save_dir"]
     save_numpy = args.save_numpy or infer_cfg["save_numpy"]
     warmup_iters = infer_cfg["warmup_iters"]
     benchmark_iters = infer_cfg["benchmark_iters"]
@@ -101,6 +102,14 @@ def main():
 
     if not os.path.isfile(h5_path):
         raise FileNotFoundError(f"HDF5 file not found: {h5_path}")
+    if args.checkpoint is None and not os.path.isfile(checkpoint_path):
+        latest_checkpoint = find_latest_train_checkpoint(
+            cfg["paths"]["output_dir"],
+            checkpoint_name="best_model.pt",
+        )
+        if latest_checkpoint is not None:
+            checkpoint_path = latest_checkpoint
+
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
@@ -112,6 +121,14 @@ def main():
 
     if "model_state_dict" not in checkpoint:
         raise KeyError("checkpoint 中缺少 model_state_dict")
+
+    save_dir = configure_eval_output_dir(
+        cfg=cfg,
+        kind="infer",
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+        explicit_output_dir=args.save_dir,
+    )
 
     standardizer = build_standardizer_from_checkpoint(checkpoint, device)
 
@@ -146,6 +163,8 @@ def main():
         "y_shape": tuple(y0.shape),
         "pattern_shape": tuple(p0.shape),
     }
+    standardizer.validate_shapes(dataset_info["y_shape"], dataset_info["pattern_shape"])
+    validate_checkpoint_dataset_shapes(checkpoint, dataset_info, context="Inference checkpoint")
 
     model = build_forward_proxy_model(cfg=cfg, dataset_info=dataset_info).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])

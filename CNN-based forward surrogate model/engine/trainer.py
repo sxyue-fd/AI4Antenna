@@ -2,6 +2,7 @@
 
 import os
 import csv
+from datetime import datetime
 import torch
 
 from engine.evaluator import evaluate_model
@@ -10,12 +11,29 @@ from utils.checkpoint import save_checkpoint
 
 def append_csv(log_path, row):
     write_header = not os.path.exists(log_path)
+    if not write_header:
+        with open(log_path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            existing_header = next(reader, [])
+        if existing_header != list(row.keys()):
+            backup_path = log_path + ".bak"
+            os.replace(log_path, backup_path)
+            write_header = True
 
     with open(log_path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def prepare_train_log(log_path, start_epoch):
+    if start_epoch != 0 or not os.path.exists(log_path):
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{log_path}.{timestamp}.bak"
+    os.replace(log_path, backup_path)
 
 
 def train_one_epoch(
@@ -102,6 +120,7 @@ def train_model(
     os.makedirs(log_dir, exist_ok=True)
 
     log_csv_path = os.path.join(log_dir, "train_log.csv")
+    prepare_train_log(log_csv_path, start_epoch)
 
     patience = cfg["train"].get("early_stop_patience", 10)
     no_improve = 0
@@ -147,8 +166,12 @@ def train_model(
                 "val_loss": val_metrics["loss"],
                 "val_y_loss": val_metrics["y_loss"],
                 "val_p_loss": val_metrics["p_loss"],
+                "val_mae": val_metrics.get("mae", None),
                 "val_y_mae": val_metrics.get("y_mae", None),
                 "val_pattern_mae": val_metrics.get("pattern_mae", None),
+                "val_mse": val_metrics.get("mse", None),
+                "val_y_mse": val_metrics.get("y_mse", None),
+                "val_pattern_mse": val_metrics.get("pattern_mse", None),
             },
         )
 
@@ -175,6 +198,9 @@ def train_model(
                         "p_mean": standardizer.p_mean.detach().cpu(),
                         "p_std": standardizer.p_std.detach().cpu(),
                     },
+                    "run_id": cfg["paths"].get("run_id"),
+                    "run_dir": cfg["paths"].get("run_dir"),
+                    "output_root": cfg["paths"].get("output_root"),
                 },
             )
             logger.info("Saved best model")

@@ -44,6 +44,8 @@ from utils.seed import set_seed
 from utils.io import ensure_dir, save_json
 from utils.logger import create_logger
 from utils.visualize import save_prediction_example
+from utils.run_dirs import configure_eval_output_dir, find_latest_train_checkpoint
+from utils.model_compat import validate_checkpoint_dataset_shapes
 
 
 def parse_args():
@@ -146,6 +148,35 @@ def main():
     cfg = get_default_config()
     cfg = update_config_from_args(cfg, args)
 
+    checkpoint_path = cfg["test"]["checkpoint"]
+    if checkpoint_path is None:
+        checkpoint_path = os.path.join(cfg["paths"]["checkpoint_dir"], "best_model.pt")
+        if not os.path.isfile(checkpoint_path):
+            latest_checkpoint = find_latest_train_checkpoint(
+                cfg["paths"]["output_dir"],
+                checkpoint_name="best_model.pt",
+            )
+            if latest_checkpoint is not None:
+                checkpoint_path = latest_checkpoint
+
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    cfg["paths"]["output_dir"] = configure_eval_output_dir(
+        cfg=cfg,
+        kind="test",
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+        explicit_output_dir=args.output_dir,
+    )
+    cfg["paths"]["log_dir"] = os.path.join(cfg["paths"]["output_dir"], "logs")
+
     ensure_dir(cfg["paths"]["output_dir"])
     ensure_dir(cfg["paths"]["log_dir"])
     ensure_dir(os.path.join(cfg["paths"]["output_dir"], "figures"))
@@ -167,13 +198,6 @@ def main():
     logger.info("Using device: %s", device)
     logger.info("Configuration:")
     logger.info("\n%s", pprint.pformat(cfg, sort_dicts=False))
-
-    checkpoint_path = cfg["test"]["checkpoint"]
-    if checkpoint_path is None:
-        checkpoint_path = os.path.join(cfg["paths"]["checkpoint_dir"], "best_model.pt")
-
-    if not os.path.isfile(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     logger.info("Loading checkpoint: %s", checkpoint_path)
     checkpoint = torch.load(
@@ -208,6 +232,7 @@ def main():
     dataloaders, dataset_info, _ = build_dataloaders(cfg, standardizer=standardizer)
 
     logger.info("Dataset info: %s", dataset_info)
+    validate_checkpoint_dataset_shapes(checkpoint, dataset_info, context="Test checkpoint")
 
     logger.info("Building model...")
     model = build_forward_proxy_model(
@@ -243,7 +268,7 @@ def main():
     logger.info("Saved test metrics to output directory.")
 
     figure_dir = os.path.join(cfg["paths"]["output_dir"], "figures")
-    logger.info("Saving 10 test prediction figures to: %s", figure_dir)
+    logger.info("Saving 5 test prediction figures to: %s", figure_dir)
 
     save_test_visualizations(
         model=model,
@@ -255,7 +280,7 @@ def main():
         max_samples=5,
     )
 
-    logger.info("Saved 10 test sample figures.")
+    logger.info("Saved 5 test sample figures.")
 
 
 if __name__ == "__main__":
