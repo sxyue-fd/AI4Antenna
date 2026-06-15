@@ -23,6 +23,8 @@ def load_or_compute_standardizer(
     force_recompute=False,
     input_key="X",
     normalize_input=False,
+    input_std_min=0.02,
+    input_clip=20.0,
 ):
     stats_path = get_standardizer_cache_path(h5_path, input_key=input_key)
 
@@ -44,7 +46,13 @@ def load_or_compute_standardizer(
         return_raw=False,
         input_key=input_key,
     )
-    standardizer = compute_stats(base_dataset, train_indices, normalize_input=normalize_input)
+    standardizer = compute_stats(
+        base_dataset,
+        train_indices,
+        normalize_input=normalize_input,
+        input_std_min=input_std_min,
+        input_clip=input_clip,
+    )
     standardizer.validate_shapes(
         y_shape,
         pattern_shape,
@@ -57,6 +65,8 @@ def load_or_compute_standardizer(
             "h5_path": h5_path,
             "input_key": input_key,
             "normalize_input": normalize_input,
+            "input_std_min": input_std_min,
+            "input_clip": input_clip,
             "num_train_samples": len(train_indices),
         }
     )
@@ -70,6 +80,8 @@ def build_dataloaders(cfg, standardizer=None):
     data_cfg = cfg.get("data", {})
     input_key = data_cfg.get("input_key", "X")
     normalize_input = data_cfg.get("normalize_input", False)
+    input_std_min = data_cfg.get("input_std_min", 0.02)
+    input_clip = data_cfg.get("input_clip", 20.0)
 
     base_dataset = H5AntennaDataset(
         h5_path,
@@ -97,6 +109,8 @@ def build_dataloaders(cfg, standardizer=None):
             force_recompute=force_recompute,
             input_key=input_key,
             normalize_input=normalize_input,
+            input_std_min=input_std_min,
+            input_clip=input_clip,
         )
     else:
         standardizer.validate_shapes(

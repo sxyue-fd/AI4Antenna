@@ -33,6 +33,17 @@ def _expected_preprocessed_shapes(src_h5_path, input_key="X"):
     }
 
 
+def get_input_chunk_size(input_key, num_samples):
+    if input_key == "current":
+        return min(8, num_samples)
+    return min(128, num_samples)
+
+
+def _expected_input_chunks(src_h5_path, input_key="X"):
+    info = read_h5_dataset_info(src_h5_path, input_key=input_key)
+    return (get_input_chunk_size(input_key, info["num_samples"]), *info["x_shape"])
+
+
 def _preprocessed_h5_matches_source(src_h5_path, dst_h5_path, input_key="X"):
     if not os.path.isfile(dst_h5_path):
         return False
@@ -45,6 +56,8 @@ def _preprocessed_h5_matches_source(src_h5_path, dst_h5_path, input_key="X"):
             for name, shape in expected.items():
                 if name not in f_dst or tuple(f_dst[name].shape) != tuple(shape):
                     return False
+            if tuple(f_dst[input_key].chunks or ()) != tuple(_expected_input_chunks(src_h5_path, input_key=input_key)):
+                return False
     except OSError:
         return False
 
@@ -118,7 +131,7 @@ def build_preprocessed_h5(
     y0 = y0.numpy().astype(np.float32)
     p0 = p0.numpy().astype(np.float32)
 
-    x_chunk = min(128, n)
+    x_chunk = get_input_chunk_size(input_key, n)
     y_chunk = min(1024, n)
     p_chunk = min(64, n)
 
@@ -131,7 +144,12 @@ def build_preprocessed_h5(
     with h5py.File(src_h5_path, "r") as f_src, h5py.File(dst_h5_path, "a") as f_dst:
         _copy_optional_metadata(f_src, f_dst)
 
-        rewrite_x = force_input or not _dataset_shape_matches(f_dst, input_key, expected_shapes[input_key])
+        expected_x_chunks = (x_chunk, *x0.shape)
+        rewrite_x = (
+            force_input
+            or not _dataset_shape_matches(f_dst, input_key, expected_shapes[input_key])
+            or tuple(f_dst[input_key].chunks or ()) != expected_x_chunks
+        )
         rewrite_y = refresh_targets or not _dataset_shape_matches(f_dst, "Y", expected_shapes["Y"])
         rewrite_p = refresh_targets or not _dataset_shape_matches(f_dst, "pattern", expected_shapes["pattern"])
 
@@ -146,7 +164,7 @@ def build_preprocessed_h5(
                 shape=expected_shapes[input_key],
                 dtype=np.float32,
                 compression=compression,
-                chunks=(x_chunk, *x0.shape),
+                chunks=expected_x_chunks,
             )
 
         if rewrite_y:
@@ -181,7 +199,7 @@ def build_preprocessed_h5(
         f_dst.attrs[f"source_{input_key}_shape"] = _shape_to_attr(src_info["source_shapes"][input_key])
         f_dst.attrs["source_y_shape"] = _shape_to_attr(src_info["source_shapes"]["Y"])
         f_dst.attrs["source_pattern_shape"] = _shape_to_attr(src_info["source_shapes"]["pattern"])
-        f_dst.attrs["x_chunk"] = x_chunk
+        f_dst.attrs[f"{input_key}_chunk"] = x_chunk
         f_dst.attrs["y_chunk"] = y_chunk
         f_dst.attrs["p_chunk"] = p_chunk
 

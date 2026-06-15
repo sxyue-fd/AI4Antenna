@@ -5,20 +5,37 @@ import torch
 
 
 class TargetStandardizer:
-    def __init__(self, y_mean, y_std, p_mean, p_std, x_mean=None, x_std=None):
+    def __init__(
+        self,
+        y_mean,
+        y_std,
+        p_mean,
+        p_std,
+        x_mean=None,
+        x_std=None,
+        x_std_min=0.02,
+        x_clip=20.0,
+    ):
         self.y_mean = y_mean
         self.y_std = y_std
         self.p_mean = p_mean
         self.p_std = p_std
         self.x_mean = x_mean
         self.x_std = x_std
+        self.x_std_min = x_std_min
+        self.x_clip = x_clip
 
     def normalize_x(self, x):
         if self.x_mean is None or self.x_std is None:
             return x
         x_mean = self.x_mean.to(x.device)
         x_std = self.x_std.to(x.device)
-        return (x - x_mean) / x_std
+        if self.x_std_min is not None:
+            x_std = torch.clamp(x_std, min=float(self.x_std_min))
+        x = (x - x_mean) / x_std
+        if self.x_clip is not None:
+            x = torch.clamp(x, min=-float(self.x_clip), max=float(self.x_clip))
+        return x
 
     def normalize_y(self, y):
         y_mean = self.y_mean.to(y.device)
@@ -79,6 +96,8 @@ class TargetStandardizer:
         if self.x_mean is not None and self.x_std is not None:
             state["x_mean"] = self.x_mean.detach().cpu()
             state["x_std"] = self.x_std.detach().cpu()
+            state["x_std_min"] = self.x_std_min
+            state["x_clip"] = self.x_clip
         return state
 
     @classmethod
@@ -90,6 +109,8 @@ class TargetStandardizer:
             p_std=state_dict["p_std"].float(),
             x_mean=state_dict.get("x_mean", None).float() if state_dict.get("x_mean", None) is not None else None,
             x_std=state_dict.get("x_std", None).float() if state_dict.get("x_std", None) is not None else None,
+            x_std_min=state_dict.get("x_std_min", 0.02),
+            x_clip=state_dict.get("x_clip", 20.0),
         )
 
     def save(self, path, extra=None):
@@ -111,7 +132,13 @@ class TargetStandardizer:
         return cls.from_state_dict(state_dict)
 
 
-def compute_stats(dataset, indices, normalize_input=False):
+def compute_stats(
+    dataset,
+    indices,
+    normalize_input=False,
+    input_std_min=0.02,
+    input_clip=20.0,
+):
     x_sum = 0
     x_sq = 0
     y_sum = 0
@@ -161,4 +188,6 @@ def compute_stats(dataset, indices, normalize_input=False):
         p_mean.float(), p_std.float(),
         x_mean.float() if x_mean is not None else None,
         x_std.float() if x_std is not None else None,
+        x_std_min=input_std_min,
+        x_clip=input_clip,
     )

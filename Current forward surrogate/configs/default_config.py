@@ -56,11 +56,13 @@ def get_default_config():
         "data": {
             "input_key": "current",
             "normalize_input": True,
+            "input_std_min": 0.02,
+            "input_clip": 20.0,
             "batch_size": 256,
-            "num_workers": 12,
+            "num_workers": 8,
             "pin_memory": True,
             "persistent_workers": True,
-            "prefetch_factor": 12,
+            "prefetch_factor": 2,
         },
 
         "preprocess": {
