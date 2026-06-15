@@ -3,6 +3,8 @@ import os
 
 
 PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+WORKSPACE_DIR = os.path.abspath(os.path.join(PROJECT_DIR, ".."))
+DATASETS_DIR = os.path.join(WORKSPACE_DIR, "datasets")
 
 
 def project_path(*parts):
@@ -17,6 +19,10 @@ def resolve_project_relative_path(path):
     if os.path.exists(candidate):
         return candidate
 
+    candidate = os.path.join(WORKSPACE_DIR, path)
+    if os.path.exists(candidate):
+        return candidate
+
     return path
 
 
@@ -24,7 +30,7 @@ def get_default_config():
     cfg = {
         "paths": {
             #"h5_path": project_path("datasets", "antenna_dataset_20260606_161522.h5"),
-            "h5_path": project_path("datasets", "antenna_dataset_20260408_150016.h5"),
+            "h5_path": os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.h5"),
             "output_dir": project_path("outputs"),
             "checkpoint_dir": project_path("checkpoints"),
             "log_dir": project_path("outputs", "logs"),
@@ -48,6 +54,8 @@ def get_default_config():
         },
 
         "data": {
+            "input_key": "X",
+            "normalize_input": False,
             "batch_size": 256,
             "num_workers": 12,
             "pin_memory": True,
@@ -57,10 +65,11 @@ def get_default_config():
 
         "preprocess": {
             "enable": True,
+            "input_keys": ["X", "current"],
             "feed_sigma": 2,
             "compression": "lzf",
             "force_rebuild": False,
-            "force_recompute_stats": True,
+            "force_recompute_stats": False,
         },
 
         "optim": {
@@ -69,8 +78,9 @@ def get_default_config():
         },
 
         "scheduler": {
-            "factor": 0.5,
-            "patience": 4,
+            "type": "cosine_annealing",
+            "t_max": None,
+            "eta_min": 1e-6,
         },
 
         "loss": {
@@ -84,7 +94,7 @@ def get_default_config():
 
         #增加推理选项
         "inference": {
-            "h5_path": project_path("datasets", "antenna_dataset_20260408_150016.h5"),
+            "h5_path": os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.h5"),
             "checkpoint": project_path("checkpoints", "best_model.pt"),
             "index": 11106,
             "device": "auto",

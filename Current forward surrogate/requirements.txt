@@ -1,0 +1,50 @@
+环境安装
+
+建议使用 Python 3.10 或以上版本。
+
+安装依赖：
+
+pip install -r requirements.txt
+数据准备
+
+请将数据文件放在：
+
+datasets/your_dataset.h5
+
+其中：
+
+your_dataset.h5 是主数据集
+训练/验证/测试索引会根据数据集大小自动生成
+训练
+
+运行训练：
+
+python train.py
+
+也可以传入自定义参数：
+
+python train.py --h5_path ./datasets/your_dataset.h5 --epochs 100 --batch_size 64
+测试
+
+运行测试：
+
+python test.py
+
+也可以指定模型路径：
+
+python test.py --checkpoint ./checkpoints/best_model.pt
+默认训练流程
+读取 HDF5 数据集并自动划分 train / val / test
+构建 train / val / test DataLoader
+用训练集统计目标标准化参数
+构建 Forward Proxy CNN
+训练并在验证集上选 best model
+在测试集上评估最终结果
+输出内容
+
+训练完成后，通常会输出：
+
+checkpoints/best_model.pt
+checkpoints/last_model.pt
+outputs/logs/train_log.csv
+outputs/logs/test_metrics.json

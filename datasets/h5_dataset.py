@@ -71,6 +71,15 @@ def normalize_x(x, sigma=1.5):
     return np.transpose(x, (2, 1, 0)).astype(np.float32)
 
 
+def normalize_current(current):
+    current = np.asarray(current, dtype=np.float32)
+    if current.ndim != 4:
+        raise ValueError(f"Expected current sample shape=(H,W,C,F), got {current.shape}")
+    h, w, c, f = current.shape
+    current = np.transpose(current, (3, 2, 1, 0))
+    return current.reshape(f * c, w, h).astype(np.float32)
+
+
 def normalize_y(y):
     y = np.asarray(y).squeeze()
     if y.ndim != 1:
@@ -109,14 +118,16 @@ def _read_meta_json(f):
         return {}
 
 
-def infer_h5_layout(f):
+def infer_h5_layout(f, input_key="X"):
     """Infer dataset layout without assuming a fixed number of pattern frequencies."""
-    x_ds = f["/X"]
+    input_name = input_key.strip("/")
+    if input_name not in f:
+        raise KeyError(f"HDF5 must contain /{input_name}")
+
+    x_ds = f[f"/{input_name}"]
     y_ds = f["/Y"]
     p_ds = f["/pattern"]
 
-    if x_ds.ndim != 4:
-        raise ValueError(f"/X expected 4 dimensions, got {x_ds.shape}")
     if y_ds.ndim != 2:
         raise ValueError(f"/Y expected 2 dimensions, got {y_ds.shape}")
     if p_ds.ndim != 4:
@@ -124,8 +135,9 @@ def infer_h5_layout(f):
 
     is_marked_preprocessed = _attr_is_true(f.attrs.get("preprocessed", False))
     looks_preprocessed = (
-        x_ds.shape[0] == y_ds.shape[0] == p_ds.shape[0]
-        and x_ds.shape[1] in (1, 2)
+        x_ds.ndim == 4
+        and x_ds.shape[0] == y_ds.shape[0] == p_ds.shape[0]
+        and x_ds.shape[1] >= 1
     )
     looks_matlab_raw = x_ds.shape[-1] == y_ds.shape[-1] == p_ds.shape[-1]
 
@@ -137,23 +149,32 @@ def infer_h5_layout(f):
             "y_shape": tuple(int(v) for v in y_ds.shape[1:]),
             "pattern_shape": tuple(int(v) for v in p_ds.shape[1:]),
             "source_shapes": {
-                "X": tuple(int(v) for v in x_ds.shape),
+                input_name: tuple(int(v) for v in x_ds.shape),
                 "Y": tuple(int(v) for v in y_ds.shape),
                 "pattern": tuple(int(v) for v in p_ds.shape),
             },
         }
 
     if looks_matlab_raw:
-        h, w, _c, n = x_ds.shape
+        if input_name == "current":
+            if x_ds.ndim != 5:
+                raise ValueError(f"/current expected 5 dimensions, got {x_ds.shape}")
+            h, w, c, f, n = x_ds.shape
+            x_shape = (int(c * f), int(w), int(h))
+        else:
+            if x_ds.ndim != 4:
+                raise ValueError(f"/{input_name} expected 4 dimensions, got {x_ds.shape}")
+            h, w, _c, n = x_ds.shape
+            x_shape = (2, int(w), int(h))
         t, p, fp, _ = p_ds.shape
         return {
             "kind": "matlab_raw",
             "num_samples": int(n),
-            "x_shape": (2, int(w), int(h)),
+            "x_shape": x_shape,
             "y_shape": (int(y_ds.shape[0]),),
             "pattern_shape": (int(fp), int(p), int(t)),
             "source_shapes": {
-                "X": tuple(int(v) for v in x_ds.shape),
+                input_name: tuple(int(v) for v in x_ds.shape),
                 "Y": tuple(int(v) for v in y_ds.shape),
                 "pattern": tuple(int(v) for v in p_ds.shape),
             },
@@ -163,17 +184,17 @@ def infer_h5_layout(f):
         "Could not infer HDF5 layout. Expected either preprocessed "
         "(N,C,H,W)/(N,F)/(N,Fp,P,T) or MATLAB raw "
         "(H,W,C,N)/(F,N)/(T,P,Fp,N); got "
-        f"X={x_ds.shape}, Y={y_ds.shape}, pattern={p_ds.shape}"
+        f"{input_name}={x_ds.shape}, Y={y_ds.shape}, pattern={p_ds.shape}"
     )
 
 
-def read_h5_dataset_info(h5_path):
+def read_h5_dataset_info(h5_path, input_key="X"):
     with h5py.File(h5_path, "r") as f:
-        for key in ("/X", "/Y", "/pattern"):
+        for key in (f"/{input_key.strip('/')}", "/Y", "/pattern"):
             if key not in f:
                 raise KeyError(f"HDF5 must contain {key}")
 
-        layout = infer_h5_layout(f)
+        layout = infer_h5_layout(f, input_key=input_key)
         meta = _read_meta_json(f)
         pattern_meta = meta.get("pattern", {}) if isinstance(meta, dict) else {}
 
@@ -189,7 +210,7 @@ def read_h5_dataset_info(h5_path):
 
 
 class H5AntennaDataset(Dataset):
-    def __init__(self, h5_path, standardizer=None, feed_sigma=1.5, return_raw=True):
+    def __init__(self, h5_path, standardizer=None, feed_sigma=1.5, return_raw=True, input_key="X"):
         if not os.path.isfile(h5_path):
             raise FileNotFoundError(h5_path)
 
@@ -197,13 +218,14 @@ class H5AntennaDataset(Dataset):
         self.standardizer = standardizer
         self.feed_sigma = feed_sigma
         self.return_raw = return_raw
+        self.input_key = input_key.strip("/")
         self._h5 = None
 
         with h5py.File(h5_path, "r") as f:
-            if "/X" not in f or "/Y" not in f or "/pattern" not in f:
-                raise KeyError("HDF5 must contain /X, /Y, and /pattern")
+            if f"/{self.input_key}" not in f or "/Y" not in f or "/pattern" not in f:
+                raise KeyError(f"HDF5 must contain /{self.input_key}, /Y, and /pattern")
 
-            layout = infer_h5_layout(f)
+            layout = infer_h5_layout(f, input_key=self.input_key)
             meta = _read_meta_json(f)
             pattern_meta = meta.get("pattern", {}) if isinstance(meta, dict) else {}
 
@@ -226,11 +248,14 @@ class H5AntennaDataset(Dataset):
         self._open()
 
         if self.layout == "preprocessed":
-            x = self._h5["/X"][idx]
+            x = self._h5[f"/{self.input_key}"][idx]
             y = self._h5["/Y"][idx]
             p = self._h5["/pattern"][idx]
         elif self.layout == "matlab_raw":
-            x = normalize_x(self._h5["/X"][:, :, :, idx], sigma=self.feed_sigma)
+            if self.input_key == "current":
+                x = normalize_current(self._h5["/current"][:, :, :, :, idx])
+            else:
+                x = normalize_x(self._h5[f"/{self.input_key}"][:, :, :, idx], sigma=self.feed_sigma)
             y = normalize_y(self._h5["/Y"][:, idx])
             p = normalize_pattern(self._h5["/pattern"][:, :, :, idx])
         else:
@@ -247,6 +272,7 @@ class H5AntennaDataset(Dataset):
             meta["p_raw"] = p.clone()
 
         if self.standardizer is not None:
+            x = self.standardizer.normalize_x(x)
             y = self.standardizer.normalize_y(y)
             p = self.standardizer.normalize_p(p)
 

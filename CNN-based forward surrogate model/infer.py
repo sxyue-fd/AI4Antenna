@@ -28,22 +28,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 
 import numpy as np
 import torch
 
+_WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _WORKSPACE_DIR not in sys.path:
+    sys.path.insert(0, _WORKSPACE_DIR)
+
 from configs.default_config import get_default_config, update_config_from_args
-from data.build_preprocessed_h5 import ensure_preprocessed_h5
-from data.h5_dataset import H5AntennaDataset
-from data.preprocess import TargetStandardizer
-from models.forward_proxy_net import build_forward_proxy_model
+from datasets.build_preprocessed_h5 import ensure_preprocessed_h5
+from datasets.h5_dataset import H5AntennaDataset
+from datasets.preprocess import TargetStandardizer
+from models.forward_surrogate_net import build_forward_surrogate
 from utils.visualize import save_prediction_example
 from utils.run_dirs import configure_eval_output_dir, find_latest_train_checkpoint
 from utils.model_compat import validate_checkpoint_dataset_shapes
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Inference for CNN forward proxy model")
+    parser = argparse.ArgumentParser(description="Inference for CNN forward surrogate model")
 
     parser.add_argument("--h5_path", type=str, help="HDF5 dataset path")
     parser.add_argument("--checkpoint", type=str, help="Checkpoint path")
@@ -70,6 +75,8 @@ def build_standardizer_from_checkpoint(checkpoint, device):
         y_std=stats["y_std"],
         p_mean=stats["p_mean"],
         p_std=stats["p_std"],
+        x_mean=stats.get("x_mean", None),
+        x_std=stats.get("x_std", None),
     )
 
     # 逐个移动到目标设备，兼容你当前的 TargetStandardizer 实现
@@ -77,6 +84,10 @@ def build_standardizer_from_checkpoint(checkpoint, device):
     standardizer.y_std = standardizer.y_std.to(device)
     standardizer.p_mean = standardizer.p_mean.to(device)
     standardizer.p_std = standardizer.p_std.to(device)
+    if standardizer.x_mean is not None:
+        standardizer.x_mean = standardizer.x_mean.to(device)
+    if standardizer.x_std is not None:
+        standardizer.x_std = standardizer.x_std.to(device)
 
     return standardizer
 
@@ -141,6 +152,8 @@ def main():
             feed_sigma=pre_cfg.get("feed_sigma",2),
             compression=pre_cfg.get("compression", "lzf"),
             force=pre_cfg.get("force_rebuild", False),
+            input_key=cfg.get("data", {}).get("input_key", "X"),
+            input_keys=pre_cfg.get("input_keys"),
         )
         print(f"Using preprocessed h5: {infer_h5_path}")
     else:
@@ -149,7 +162,11 @@ def main():
 
     # 这里读取的是“用于推理的数据集”，不做 standardizer 标准化，
     # 便于直接拿到原始标签值与反标准化后的预测结果进行对比。
-    infer_dataset = H5AntennaDataset(infer_h5_path, standardizer=None)
+    infer_dataset = H5AntennaDataset(
+        infer_h5_path,
+        standardizer=None,
+        input_key=cfg.get("data", {}).get("input_key", "X"),
+    )
 
     if len(infer_dataset) == 0:
         raise RuntimeError("数据集为空，无法执行推理。")
@@ -163,15 +180,20 @@ def main():
         "y_shape": tuple(y0.shape),
         "pattern_shape": tuple(p0.shape),
     }
-    standardizer.validate_shapes(dataset_info["y_shape"], dataset_info["pattern_shape"])
+    standardizer.validate_shapes(
+        dataset_info["y_shape"],
+        dataset_info["pattern_shape"],
+        x_shape=dataset_info["x_shape"] if cfg.get("data", {}).get("normalize_input", False) else None,
+    )
     validate_checkpoint_dataset_shapes(checkpoint, dataset_info, context="Inference checkpoint")
 
-    model = build_forward_proxy_model(cfg=cfg, dataset_info=dataset_info).to(device)
+    model = build_forward_surrogate(cfg=cfg, dataset_info=dataset_info).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
     x, y_true_raw, p_true_raw, _ = infer_dataset[index]
     x = x.unsqueeze(0).to(device)
+    x = standardizer.normalize_x(x)
 
     # 模型输出仍处于标准化空间
     #y_pred_norm, p_pred_norm = model(x)

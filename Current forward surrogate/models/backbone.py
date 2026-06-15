@@ -53,7 +53,7 @@ class DeepCNNBackbone(nn.Module):
             BasicBlock(128, 128, stride=1),
             BasicBlock(128, 256, stride=2),
             BasicBlock(256, 256, stride=1),
-            BasicBlock(256, 512, stride=1),
+            BasicBlock(256, 512, stride=2),
             BasicBlock(512, 512, stride=1),
             nn.AdaptiveAvgPool2d((1, 1)),
         )

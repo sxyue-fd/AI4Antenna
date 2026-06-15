@@ -32,7 +32,7 @@ randomFillFactorRange        = [0.30, 0.50];%形态学操作前的填充率范�
 minFinalFillRate             = 0.10;%最小填充率限制
 maxTriesPerRandomCase        = 200;
 
-fineN                        = 64;  % 电流插值规则网格
+fineN                        = 32;  % 电流插值规则网格
 overlap_mm                   = [];  % 定为5e-6保证合并操作不出错
 
 geom.patch_L_mm              = 14;

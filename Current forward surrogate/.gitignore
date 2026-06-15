@@ -1,0 +1,12 @@
+# Runtime artifacts
+/checkpoints/
+/outputs/
+
+# Dataset/runtime cache files
+/datasets/*.h5
+/datasets/*.pt
+/datasets/*.mat
+
+# Python cache
+__pycache__/
+*.py[cod]

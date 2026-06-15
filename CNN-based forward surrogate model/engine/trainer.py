@@ -152,7 +152,7 @@ def train_model(
             use_amp=use_amp,
         )
 
-        scheduler.step(val_metrics["loss"])
+        scheduler.step()
 
         current_lr = optimizer.param_groups[0]["lr"]
         append_csv(
@@ -192,12 +192,7 @@ def train_model(
                     "config": cfg,
                     "dataset_info": dataset_info,
                     "scaler_state_dict": scaler.state_dict(),
-                    "standardizer_stats": {
-                        "y_mean": standardizer.y_mean.detach().cpu(),
-                        "y_std": standardizer.y_std.detach().cpu(),
-                        "p_mean": standardizer.p_mean.detach().cpu(),
-                        "p_std": standardizer.p_std.detach().cpu(),
-                    },
+                    "standardizer_stats": standardizer.state_dict(),
                     "run_id": cfg["paths"].get("run_id"),
                     "run_dir": cfg["paths"].get("run_dir"),
                     "output_root": cfg["paths"].get("output_root"),

@@ -30,14 +30,19 @@ from __future__ import annotations
 import argparse
 import os
 import pprint
+import sys
 
 import torch
 
-from data.build_preprocessed_h5 import ensure_preprocessed_h5
+_WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _WORKSPACE_DIR not in sys.path:
+    sys.path.insert(0, _WORKSPACE_DIR)
+
+from datasets.build_preprocessed_h5 import ensure_preprocessed_h5
 from configs.default_config import get_default_config, update_config_from_args
-from data.datamodule import build_dataloaders
-from data.preprocess import TargetStandardizer
-from models.forward_proxy_net import build_forward_proxy_model
+from datasets.datamodule import build_dataloaders
+from datasets.preprocess import TargetStandardizer
+from models.forward_surrogate_net import build_forward_surrogate
 from models.losses import build_loss_function
 from engine.evaluator import evaluate_model
 from utils.seed import set_seed
@@ -49,7 +54,7 @@ from utils.model_compat import validate_checkpoint_dataset_shapes
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Test CNN forward proxy model")
+    parser = argparse.ArgumentParser(description="Test CNN forward surrogate model")
 
     parser.add_argument("--h5_path", type=str, default=None, help="HDF5 dataset path")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path")
@@ -80,12 +85,18 @@ def build_standardizer_from_checkpoint(checkpoint, device):
         y_std=stats["y_std"],
         p_mean=stats["p_mean"],
         p_std=stats["p_std"],
+        x_mean=stats.get("x_mean", None),
+        x_std=stats.get("x_std", None),
     )
 
     standardizer.y_mean = standardizer.y_mean.to(device)
     standardizer.y_std = standardizer.y_std.to(device)
     standardizer.p_mean = standardizer.p_mean.to(device)
     standardizer.p_std = standardizer.p_std.to(device)
+    if standardizer.x_mean is not None:
+        standardizer.x_mean = standardizer.x_mean.to(device)
+    if standardizer.x_std is not None:
+        standardizer.x_std = standardizer.x_std.to(device)
 
     return standardizer
 
@@ -223,6 +234,8 @@ def main():
             feed_sigma=pre_cfg.get("feed_sigma", 1.5),
             compression=pre_cfg.get("compression", "lzf"),
             force=pre_cfg.get("force_rebuild", False),
+            input_key=cfg.get("data", {}).get("input_key", "X"),
+            input_keys=pre_cfg.get("input_keys"),
         )
         cfg["paths"]["h5_path"] = preprocessed_h5_path
         logger.info("Using preprocessed h5: %s", preprocessed_h5_path)
@@ -235,7 +248,7 @@ def main():
     validate_checkpoint_dataset_shapes(checkpoint, dataset_info, context="Test checkpoint")
 
     logger.info("Building model...")
-    model = build_forward_proxy_model(
+    model = build_forward_surrogate(
         cfg=cfg,
         dataset_info=dataset_info,
     )

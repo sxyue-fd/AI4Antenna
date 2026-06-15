@@ -81,8 +81,24 @@ def plot_pattern_slice(
         )
 
         axes = axes.flatten()
+        plotted_pols = min(P, 4)
+        radial_values = []
+        for pol_idx in range(plotted_pols):
+            radial_values.extend([
+                np.asarray(p_true[freq_idx, pol_idx]).ravel(),
+                np.asarray(p_pred[freq_idx, pol_idx]).ravel(),
+            ])
 
-        for pol_idx in range(min(P, 4)):
+        if radial_values:
+            radial_values = np.concatenate(radial_values)
+            radial_values = radial_values[np.isfinite(radial_values)]
+            radial_max = float(np.max(radial_values)) if radial_values.size else 1.0
+            if radial_max <= 0:
+                radial_max = 1.0
+        else:
+            radial_max = 1.0
+
+        for pol_idx in range(plotted_pols):
 
             ax = axes[pol_idx]
 
@@ -102,6 +118,10 @@ def plot_pattern_slice(
             ax.set_theta_zero_location("E")
             ax.set_theta_direction(1)
             ax.set_thetagrids(np.arange(0, 360, 30))
+            ax.set_ylim(0, radial_max)
+
+        for ax in axes[plotted_pols:]:
+            ax.set_ylim(0, radial_max)
 
         # 总标题
         fig.suptitle(f"Radiation Pattern @ Freq Index {freq_idx}")
