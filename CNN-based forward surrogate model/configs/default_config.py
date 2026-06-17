@@ -27,10 +27,12 @@ def resolve_project_relative_path(path):
 
 
 def get_default_config():
+    default_h5_path = os.path.join(DATASETS_DIR, "antenna_dataset_20260614_203654.preprocessed.standardized.h5")
+
     cfg = {
         "paths": {
-            #"h5_path": project_path("datasets", "antenna_dataset_20260606_161522.h5"),
-            "h5_path": os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.h5"),
+            "h5_path": default_h5_path,
+            # "h5_path": os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.preprocessed.standardized.h5"),
             "output_dir": project_path("outputs"),
             "checkpoint_dir": project_path("checkpoints"),
             "log_dir": project_path("outputs", "logs"),
@@ -41,7 +43,7 @@ def get_default_config():
             "device": "auto",   # auto / cuda / cpu
             "epochs": 200,
             "resume": None,
-            "early_stop_patience": 20,
+            "early_stop_patience": 25,
             "amp": True,
             "cudnn_benchmark": True,
         },
@@ -55,21 +57,11 @@ def get_default_config():
 
         "data": {
             "input_key": "X",
-            "normalize_input": False,
             "batch_size": 256,
             "num_workers": 12,
             "pin_memory": True,
             "persistent_workers": True,
             "prefetch_factor": 12,
-        },
-
-        "preprocess": {
-            "enable": True,
-            "input_keys": ["X", "current"],
-            "feed_sigma": 2,
-            "compression": "lzf",
-            "force_rebuild": False,
-            "force_recompute_stats": False,
         },
 
         "optim": {
@@ -94,7 +86,8 @@ def get_default_config():
 
         #增加推理选项
         "inference": {
-            "h5_path": os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.h5"),
+            "h5_path": default_h5_path,
+            #"h5_path": os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.preprocessed.standardized.h5"),
             "checkpoint": project_path("checkpoints", "best_model.pt"),
             "index": 11106,
             "device": "auto",

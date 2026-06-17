@@ -19,9 +19,9 @@ _WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _WORKSPACE_DIR not in sys.path:
     sys.path.insert(0, _WORKSPACE_DIR)
 
-from datasets.build_preprocessed_h5 import ensure_preprocessed_h5
 from configs.default_config import get_default_config, update_config_from_args
 from datasets.datamodule import build_dataloaders
+from datasets.preprocess import ensure_standardized_dataset
 from models.forward_surrogate_net import build_forward_surrogate
 from models.losses import build_loss_function
 from engine.trainer import train_model
@@ -118,28 +118,20 @@ def main():
         cfg,
     )
 
-    raw_h5_path = cfg["paths"]["h5_path"]
-    if not os.path.isfile(raw_h5_path):
-        raise FileNotFoundError(f"HDF5 dataset not found: {raw_h5_path}")
-
-    pre_cfg = cfg.get("preprocess", {})
-    dataset_h5_path = raw_h5_path
-
-    if pre_cfg.get("enable", True):
-        logger.info("Preparing preprocessed dataset...")
-        dataset_h5_path = ensure_preprocessed_h5(
-            src_h5_path=raw_h5_path,
-            feed_sigma=pre_cfg.get("feed_sigma", 1.5),
-            compression=pre_cfg.get("compression", "lzf"),
-            force=pre_cfg.get("force_rebuild", False),
-            input_key=cfg.get("data", {}).get("input_key", "X"),
-            input_keys=pre_cfg.get("input_keys"),
-        )
-        logger.info("Using preprocessed h5: %s", dataset_h5_path)
-    else:
-        logger.info("Preprocess disabled, using raw h5 directly: %s", dataset_h5_path)
-
+    dataset_h5_path = cfg["paths"]["h5_path"]
+    split_cfg = cfg.get("split", {})
+    dataset_h5_path = ensure_standardized_dataset(
+        h5_path=dataset_h5_path,
+        input_keys=["X", "current"],
+        feed_sigma=2.0,
+        compression="lzf",
+        train_ratio=split_cfg.get("train_ratio", 0.8),
+        val_ratio=split_cfg.get("val_ratio", 0.1),
+        test_ratio=split_cfg.get("test_ratio", 0.1),
+        seed=split_cfg.get("seed", cfg.get("train", {}).get("seed", 106)),
+    )
     cfg["paths"]["h5_path"] = dataset_h5_path
+    logger.info("Using standardized h5: %s", dataset_h5_path)
 
     logger.info("Building dataloaders...")
     dataloaders, dataset_info, standardizer = build_dataloaders(cfg)

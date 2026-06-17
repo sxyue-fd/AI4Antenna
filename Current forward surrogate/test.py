@@ -38,7 +38,6 @@ _WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _WORKSPACE_DIR not in sys.path:
     sys.path.insert(0, _WORKSPACE_DIR)
 
-from datasets.build_preprocessed_h5 import ensure_preprocessed_h5
 from configs.default_config import get_default_config, update_config_from_args
 from datasets.datamodule import build_dataloaders
 from datasets.preprocess import TargetStandardizer
@@ -223,24 +222,9 @@ def main():
     # 测试时统一使用 checkpoint 中保存的 standardizer
     standardizer = build_standardizer_from_checkpoint(checkpoint, device)
     
-    raw_h5_path = cfg["paths"]["h5_path"]
-
-    pre_cfg = cfg.get("preprocess", {})
-
-    if pre_cfg.get("enable", True):
-        logger.info("Preparing preprocessed dataset for testing...")
-        preprocessed_h5_path = ensure_preprocessed_h5(
-            src_h5_path=raw_h5_path,
-            feed_sigma=pre_cfg.get("feed_sigma", 1.5),
-            compression=pre_cfg.get("compression", "lzf"),
-            force=pre_cfg.get("force_rebuild", False),
-            input_key=cfg.get("data", {}).get("input_key", "X"),
-            input_keys=pre_cfg.get("input_keys"),
-        )
-        cfg["paths"]["h5_path"] = preprocessed_h5_path
-        logger.info("Using preprocessed h5: %s", preprocessed_h5_path)
-    else:
-        logger.info("Preprocess disabled, using raw h5 directly.")
+    if not os.path.isfile(cfg["paths"]["h5_path"]):
+        raise FileNotFoundError(f"HDF5 dataset not found: {cfg['paths']['h5_path']}")
+    logger.info("Using standardized h5: %s", cfg["paths"]["h5_path"])
     logger.info("Loading dataloaders...")
     dataloaders, dataset_info, _ = build_dataloaders(cfg, standardizer=standardizer)
 

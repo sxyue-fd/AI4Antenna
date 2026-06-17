@@ -143,7 +143,7 @@ def infer_h5_layout(f, input_key="X"):
 
     if is_marked_preprocessed or looks_preprocessed:
         return {
-            "kind": "preprocessed",
+            "kind": "standardized" if _attr_is_true(f.attrs.get("standardized", False)) else "preprocessed",
             "num_samples": int(x_ds.shape[0]),
             "x_shape": tuple(int(v) for v in x_ds.shape[1:]),
             "y_shape": tuple(int(v) for v in y_ds.shape[1:]),
@@ -230,6 +230,7 @@ class H5AntennaDataset(Dataset):
             pattern_meta = meta.get("pattern", {}) if isinstance(meta, dict) else {}
 
             self.layout = layout["kind"]
+            self.is_standardized = self.layout == "standardized"
             self.n = layout["num_samples"]
             self.x_shape = layout["x_shape"]
             self.y_shape = layout["y_shape"]
@@ -247,7 +248,7 @@ class H5AntennaDataset(Dataset):
     def __getitem__(self, idx):
         self._open()
 
-        if self.layout == "preprocessed":
+        if self.layout in ("preprocessed", "standardized"):
             x = self._h5[f"/{self.input_key}"][idx]
             y = self._h5["/Y"][idx]
             p = self._h5["/pattern"][idx]
@@ -268,10 +269,21 @@ class H5AntennaDataset(Dataset):
         meta = {}
 
         if self.return_raw:
-            meta["y_raw"] = y.clone()
-            meta["p_raw"] = p.clone()
+            if self.layout == "standardized" and "Y_raw" in self._h5 and "pattern_raw" in self._h5:
+                y_raw = self._h5["/Y_raw"][idx]
+                p_raw = self._h5["/pattern_raw"][idx]
+                meta["y_raw"] = torch.from_numpy(np.asarray(y_raw, dtype=np.float32))
+                meta["p_raw"] = torch.from_numpy(np.asarray(p_raw, dtype=np.float32))
+            else:
+                meta["y_raw"] = y.clone()
+                meta["p_raw"] = p.clone()
 
         if self.standardizer is not None:
+            if self.layout == "standardized":
+                raise ValueError(
+                    "Standardized HDF5 already contains normalized tensors; "
+                    "do not pass a standardizer to H5AntennaDataset."
+                )
             x = self.standardizer.normalize_x(x)
             y = self.standardizer.normalize_y(y)
             p = self.standardizer.normalize_p(p)

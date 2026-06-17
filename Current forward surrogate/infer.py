@@ -1,27 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-infer.py
-===============================================================================
-用途：
-    对单个样本执行前向代理模型推理。
-
-功能：
-    1. 读取 HDF5 数据集
-    2. 从 checkpoint 中恢复模型权重与 standardizer_stats
-    3. 自动检查并生成预处理后的 HDF5（如需要）
-    4. 对指定样本执行前向预测
-    5. 将预测结果从标准化空间反变换回原始空间
-    6. 打印并可选保存推理结果
-
-说明：
-    本脚本不重新计算标准化统计量，
-    而是直接使用训练时保存在 checkpoint 中的 standardizer_stats。
-
-    若已将 H5AntennaDataset 改为读取“预处理后 HDF5”的版本，
-    则本脚本会在推理前自动调用 ensure_preprocessed_h5(...)，
-    保证读取的是 *.preprocessed.h5。
-===============================================================================
-"""
+﻿# -*- coding: utf-8 -*-
+"""Run inference from a preprocessed standardized HDF5 dataset."""
 
 from __future__ import annotations
 
@@ -39,7 +17,6 @@ if _WORKSPACE_DIR not in sys.path:
     sys.path.insert(0, _WORKSPACE_DIR)
 
 from configs.default_config import get_default_config, update_config_from_args
-from datasets.build_preprocessed_h5 import ensure_preprocessed_h5
 from datasets.h5_dataset import H5AntennaDataset
 from datasets.preprocess import TargetStandardizer
 from models.forward_surrogate_net import build_forward_surrogate
@@ -62,13 +39,13 @@ def parse_args():
 
 def build_standardizer_from_checkpoint(checkpoint, device):
     if "standardizer_stats" not in checkpoint:
-        raise KeyError("checkpoint 中缺少 standardizer_stats")
+        raise KeyError("checkpoint 涓己灏?standardizer_stats")
 
     stats = checkpoint["standardizer_stats"]
     required_keys = ["y_mean", "y_std", "p_mean", "p_std"]
     for k in required_keys:
         if k not in stats:
-            raise KeyError(f"standardizer_stats 中缺少字段: {k}")
+            raise KeyError(f"standardizer_stats 涓己灏戝瓧娈? {k}")
 
     standardizer = TargetStandardizer(
         y_mean=stats["y_mean"],
@@ -79,7 +56,7 @@ def build_standardizer_from_checkpoint(checkpoint, device):
         x_std=stats.get("x_std", None),
     )
 
-    # 逐个移动到目标设备，兼容你当前的 TargetStandardizer 实现
+    # 閫愪釜绉诲姩鍒扮洰鏍囪澶囷紝鍏煎浣犲綋鍓嶇殑 TargetStandardizer 瀹炵幇
     standardizer.y_mean = standardizer.y_mean.to(device)
     standardizer.y_std = standardizer.y_std.to(device)
     standardizer.p_mean = standardizer.p_mean.to(device)
@@ -131,7 +108,7 @@ def main():
     )
 
     if "model_state_dict" not in checkpoint:
-        raise KeyError("checkpoint 中缺少 model_state_dict")
+        raise KeyError("checkpoint 涓己灏?model_state_dict")
 
     save_dir = configure_eval_output_dir(
         cfg=cfg,
@@ -143,25 +120,10 @@ def main():
 
     standardizer = build_standardizer_from_checkpoint(checkpoint, device)
 
-    pre_cfg = cfg.get("preprocess", {})
+    infer_h5_path = h5_path
+    print(f"Using standardized h5: {infer_h5_path}")
 
-    if pre_cfg.get("enable", True):
-        print("Preparing preprocessed dataset for inference...")
-        infer_h5_path = ensure_preprocessed_h5(
-            src_h5_path=h5_path,
-            feed_sigma=pre_cfg.get("feed_sigma",2),
-            compression=pre_cfg.get("compression", "lzf"),
-            force=pre_cfg.get("force_rebuild", False),
-            input_key=cfg.get("data", {}).get("input_key", "X"),
-            input_keys=pre_cfg.get("input_keys"),
-        )
-        print(f"Using preprocessed h5: {infer_h5_path}")
-    else:
-        infer_h5_path = h5_path
-        print("Preprocess disabled, using raw h5 directly.")
-
-    # 这里读取的是“用于推理的数据集”，不做 standardizer 标准化，
-    # 便于直接拿到原始标签值与反标准化后的预测结果进行对比。
+    # The standardized HDF5 already contains normalized tensors.
     infer_dataset = H5AntennaDataset(
         infer_h5_path,
         standardizer=None,
@@ -169,10 +131,10 @@ def main():
     )
 
     if len(infer_dataset) == 0:
-        raise RuntimeError("数据集为空，无法执行推理。")
+        raise RuntimeError("Dataset is empty; inference cannot run.")
 
     if index < 0 or index >= len(infer_dataset):
-        raise IndexError(f"index={index} 超出范围，合法区间为 [0, {len(infer_dataset)-1}]")
+        raise IndexError(f"index={index} is out of range [0, {len(infer_dataset)-1}]")
 
     x0, y0, p0, _ = infer_dataset[0]
     dataset_info = {
@@ -183,7 +145,7 @@ def main():
     standardizer.validate_shapes(
         dataset_info["y_shape"],
         dataset_info["pattern_shape"],
-        x_shape=dataset_info["x_shape"] if cfg.get("data", {}).get("normalize_input", False) else None,
+        x_shape=None,
     )
     validate_checkpoint_dataset_shapes(checkpoint, dataset_info, context="Inference checkpoint")
 
@@ -191,11 +153,12 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    x, y_true_raw, p_true_raw, _ = infer_dataset[index]
+    x, _, _, meta = infer_dataset[index]
     x = x.unsqueeze(0).to(device)
-    x = standardizer.normalize_x(x)
+    y_true_raw = meta["y_raw"]
+    p_true_raw = meta["p_raw"]
 
-    # 模型输出仍处于标准化空间
+    # 妯″瀷杈撳嚭浠嶅浜庢爣鍑嗗寲绌洪棿
     #y_pred_norm, p_pred_norm = model(x)
     # =========================
     # inference timing
@@ -242,7 +205,7 @@ def main():
 
     avg_infer_time = (time.time() - start_time) / benchmark_iters
 
-    # 反标准化回原始空间
+    # 鍙嶆爣鍑嗗寲鍥炲師濮嬬┖闂?
     y_pred_raw = standardizer.denormalize_y(y_pred_norm).squeeze(0).cpu()
     p_pred_raw = standardizer.denormalize_p(p_pred_norm).squeeze(0).cpu()
 
@@ -313,3 +276,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

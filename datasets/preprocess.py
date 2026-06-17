@@ -1,7 +1,34 @@
 # -*- coding: utf-8 -*-
 
+import argparse
 import os
+import sys
+
+import h5py
+import numpy as np
 import torch
+
+_WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _WORKSPACE_DIR not in sys.path:
+    sys.path.insert(0, _WORKSPACE_DIR)
+
+from datasets.build_preprocessed_h5 import ensure_preprocessed_h5, get_preprocessed_h5_path
+from datasets.h5_dataset import H5AntennaDataset, read_h5_dataset_info
+from datasets.split_loader import build_split_indices
+
+
+DEFAULT_PREPROCESS_CONFIG = {
+    #"h5_path": os.path.join(_WORKSPACE_DIR, "datasets", "antenna_dataset_20260614_203654.h5"),
+    "h5_path": os.path.join(_WORKSPACE_DIR, "datasets", "antenna_dataset_20260408_150016.h5"),
+    "input_keys": ["X", "current"],
+    "feed_sigma": 2.0,
+    "compression": "lzf",
+    "force": False,
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "seed": 106,
+}
 
 
 class TargetStandardizer:
@@ -13,8 +40,7 @@ class TargetStandardizer:
         p_std,
         x_mean=None,
         x_std=None,
-        x_std_min=0.02,
-        x_clip=20.0,
+        input_stats=None,
     ):
         self.y_mean = y_mean
         self.y_std = y_std
@@ -22,20 +48,22 @@ class TargetStandardizer:
         self.p_std = p_std
         self.x_mean = x_mean
         self.x_std = x_std
-        self.x_std_min = x_std_min
-        self.x_clip = x_clip
+        self.input_stats = input_stats or {}
 
     def normalize_x(self, x):
         if self.x_mean is None or self.x_std is None:
             return x
         x_mean = self.x_mean.to(x.device)
         x_std = self.x_std.to(x.device)
-        if self.x_std_min is not None:
-            x_std = torch.clamp(x_std, min=float(self.x_std_min))
-        x = (x - x_mean) / x_std
-        if self.x_clip is not None:
-            x = torch.clamp(x, min=-float(self.x_clip), max=float(self.x_clip))
-        return x
+        return (x - x_mean) / x_std
+
+    def normalize_input(self, name, x):
+        stats = self.input_stats.get(name)
+        if stats is None:
+            return x
+        mean = stats["mean"].to(x.device)
+        std = stats["std"].to(x.device)
+        return (x - mean) / std
 
     def normalize_y(self, y):
         y_mean = self.y_mean.to(y.device)
@@ -93,11 +121,17 @@ class TargetStandardizer:
             "p_mean": self.p_mean.detach().cpu(),
             "p_std": self.p_std.detach().cpu(),
         }
+        if self.input_stats:
+            state["input_stats"] = {
+                name: {
+                    "mean": stats["mean"].detach().cpu(),
+                    "std": stats["std"].detach().cpu(),
+                }
+                for name, stats in self.input_stats.items()
+            }
         if self.x_mean is not None and self.x_std is not None:
             state["x_mean"] = self.x_mean.detach().cpu()
             state["x_std"] = self.x_std.detach().cpu()
-            state["x_std_min"] = self.x_std_min
-            state["x_clip"] = self.x_clip
         return state
 
     @classmethod
@@ -109,8 +143,13 @@ class TargetStandardizer:
             p_std=state_dict["p_std"].float(),
             x_mean=state_dict.get("x_mean", None).float() if state_dict.get("x_mean", None) is not None else None,
             x_std=state_dict.get("x_std", None).float() if state_dict.get("x_std", None) is not None else None,
-            x_std_min=state_dict.get("x_std_min", 0.02),
-            x_clip=state_dict.get("x_clip", 20.0),
+            input_stats={
+                name: {
+                    "mean": stats["mean"].float(),
+                    "std": stats["std"].float(),
+                }
+                for name, stats in state_dict.get("input_stats", {}).items()
+            },
         )
 
     def save(self, path, extra=None):
@@ -136,8 +175,6 @@ def compute_stats(
     dataset,
     indices,
     normalize_input=False,
-    input_std_min=0.02,
-    input_clip=20.0,
 ):
     x_sum = 0
     x_sq = 0
@@ -188,6 +225,374 @@ def compute_stats(
         p_mean.float(), p_std.float(),
         x_mean.float() if x_mean is not None else None,
         x_std.float() if x_std is not None else None,
-        x_std_min=input_std_min,
-        x_clip=input_clip,
     )
+
+
+def get_standardized_h5_path(preprocessed_h5_path):
+    base, ext = os.path.splitext(preprocessed_h5_path)
+    if base.endswith(".preprocessed"):
+        base = base[: -len(".preprocessed")] + ".preprocessed.standardized"
+    else:
+        base = base + ".standardized"
+    return f"{base}{ext}"
+
+
+def get_unified_standardizer_path(preprocessed_h5_path):
+    base, _ = os.path.splitext(preprocessed_h5_path)
+    if base.endswith(".preprocessed"):
+        base = base[: -len(".preprocessed")]
+    return f"{base}.standardizer.pt"
+
+
+def get_raw_h5_path_from_standardized_path(standardized_h5_path):
+    suffix = ".preprocessed.standardized.h5"
+    if standardized_h5_path.endswith(suffix):
+        return standardized_h5_path[: -len(suffix)] + ".h5"
+    base, ext = os.path.splitext(standardized_h5_path)
+    if base.endswith(".preprocessed.standardized"):
+        return base[: -len(".preprocessed.standardized")] + ext
+    return standardized_h5_path
+
+
+def get_preprocessed_h5_path_from_standardized_path(standardized_h5_path):
+    suffix = ".preprocessed.standardized.h5"
+    if standardized_h5_path.endswith(suffix):
+        return standardized_h5_path[: -len(suffix)] + ".preprocessed.h5"
+    base, ext = os.path.splitext(standardized_h5_path)
+    if base.endswith(".preprocessed.standardized"):
+        return base[: -len(".standardized")] + ext
+    return standardized_h5_path
+
+
+def _as_float_array(x):
+    return np.asarray(x, dtype=np.float32)
+
+
+def _compute_mean_std(dataset, indices, input_keys):
+    sums = {key: None for key in input_keys}
+    sq_sums = {key: None for key in input_keys}
+    y_sum = y_sq = p_sum = p_sq = None
+    count = 0
+
+    datasets = {
+        key: H5AntennaDataset(dataset.h5_path, return_raw=False, input_key=key)
+        for key in input_keys
+    }
+
+    for idx in indices:
+        for key, key_dataset in datasets.items():
+            x, y, p, _ = key_dataset[int(idx)]
+            x = x.double()
+            if sums[key] is None:
+                sums[key] = torch.zeros_like(x)
+                sq_sums[key] = torch.zeros_like(x)
+            sums[key] += x
+            sq_sums[key] += x * x
+
+        y = y.double()
+        p = p.double()
+        if count == 0:
+            y_sum = torch.zeros_like(y)
+            y_sq = torch.zeros_like(y)
+            p_sum = torch.zeros_like(p)
+            p_sq = torch.zeros_like(p)
+        y_sum += y
+        y_sq += y * y
+        p_sum += p
+        p_sq += p * p
+        count += 1
+
+    y_mean = y_sum / count
+    p_mean = p_sum / count
+    y_std = torch.sqrt(torch.clamp(y_sq / count - y_mean**2, min=1e-8))
+    p_std = torch.sqrt(torch.clamp(p_sq / count - p_mean**2, min=1e-8))
+
+    input_stats = {}
+    for key in input_keys:
+        mean = sums[key] / count
+        std = torch.sqrt(torch.clamp(sq_sums[key] / count - mean**2, min=1e-8))
+        input_stats[key] = {
+            "mean": mean.float(),
+            "std": std.float(),
+        }
+
+    return TargetStandardizer(
+        y_mean.float(),
+        y_std.float(),
+        p_mean.float(),
+        p_std.float(),
+        input_stats=input_stats,
+    )
+
+
+def _copy_metadata(src, dst):
+    for name in ("freq_hz", "pattern_freq_hz", "pattern_theta_deg", "current_freq_hz"):
+        if name in src and name not in dst:
+            src.copy(name, dst)
+    for key, value in src.attrs.items():
+        dst.attrs[key] = value
+
+
+def _create_like(dst, name, source, compression, chunks=None):
+    if name in dst:
+        del dst[name]
+    return dst.create_dataset(
+        name,
+        shape=source.shape,
+        dtype=np.float32,
+        compression=compression,
+        chunks=chunks or source.chunks,
+    )
+
+
+def build_standardized_h5(
+    preprocessed_h5_path,
+    standardized_h5_path=None,
+    standardizer_path=None,
+    input_keys=None,
+    train_ratio=0.8,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    seed=106,
+    compression="lzf",
+    force=False,
+):
+    if not os.path.isfile(preprocessed_h5_path):
+        raise FileNotFoundError(preprocessed_h5_path)
+
+    input_keys = list(input_keys or ["X", "current"])
+    standardized_h5_path = standardized_h5_path or get_standardized_h5_path(preprocessed_h5_path)
+    standardizer_path = standardizer_path or get_unified_standardizer_path(preprocessed_h5_path)
+
+    if os.path.isfile(standardized_h5_path) and os.path.isfile(standardizer_path) and not force:
+        print(f"[preprocess] reuse standardized h5: {standardized_h5_path}")
+        print(f"[preprocess] reuse standardizer: {standardizer_path}")
+        return standardized_h5_path, standardizer_path
+
+    base_dataset = H5AntennaDataset(preprocessed_h5_path, return_raw=False, input_key=input_keys[0])
+    split = build_split_indices(
+        num_samples=len(base_dataset),
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+    standardizer = _compute_mean_std(
+        base_dataset,
+        split["train"],
+        input_keys=input_keys,
+    )
+    standardizer.save(
+        standardizer_path,
+        extra={
+            "preprocessed_h5_path": preprocessed_h5_path,
+            "standardized_h5_path": standardized_h5_path,
+            "input_keys": input_keys,
+            "split": {k: v.tolist() for k, v in split.items()},
+        },
+    )
+
+    os.makedirs(os.path.dirname(standardized_h5_path) or ".", exist_ok=True)
+    with h5py.File(preprocessed_h5_path, "r") as src, h5py.File(standardized_h5_path, "w") as dst:
+        _copy_metadata(src, dst)
+        dst.attrs["preprocessed"] = True
+        dst.attrs["standardized"] = True
+        dst.attrs["standardizer_path"] = os.path.abspath(standardizer_path)
+        dst.attrs["source_preprocessed_h5"] = os.path.abspath(preprocessed_h5_path)
+        dst.attrs["preprocessed_inputs"] = ",".join(input_keys)
+
+        y_src = src["Y"]
+        p_src = src["pattern"]
+        y_dst = _create_like(dst, "Y", y_src, compression)
+        p_dst = _create_like(dst, "pattern", p_src, compression)
+        y_raw_dst = _create_like(dst, "Y_raw", y_src, compression)
+        p_raw_dst = _create_like(dst, "pattern_raw", p_src, compression)
+
+        input_dsts = {}
+        for key in input_keys:
+            if key not in src:
+                raise KeyError(f"HDF5 must contain /{key}")
+            input_dsts[key] = _create_like(dst, key, src[key], compression)
+
+        n = y_src.shape[0]
+        for start in range(0, n, 256):
+            end = min(start + 256, n)
+            y = _as_float_array(y_src[start:end])
+            p = _as_float_array(p_src[start:end])
+            y_raw_dst[start:end] = y
+            p_raw_dst[start:end] = p
+            y_dst[start:end] = standardizer.normalize_y(torch.from_numpy(y)).numpy().astype(np.float32)
+            p_dst[start:end] = standardizer.normalize_p(torch.from_numpy(p)).numpy().astype(np.float32)
+
+            for key, x_dst in input_dsts.items():
+                x = _as_float_array(src[key][start:end])
+                x_dst[start:end] = standardizer.normalize_input(key, torch.from_numpy(x)).numpy().astype(np.float32)
+
+            if end == n or end % 1024 == 0:
+                print(f"[preprocess] standardized [{end}/{n}]")
+
+    print(f"[preprocess] saved standardized h5: {standardized_h5_path}")
+    print(f"[preprocess] saved unified standardizer: {standardizer_path}")
+    return standardized_h5_path, standardizer_path
+
+
+def preprocess_dataset(
+    src_h5_path,
+    input_keys=None,
+    feed_sigma=2.0,
+    compression="lzf",
+    force=False,
+    train_ratio=0.8,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    seed=106,
+):
+    input_keys = input_keys or ["X", "current"]
+    preprocessed_h5_path = ensure_preprocessed_h5(
+        src_h5_path=src_h5_path,
+        feed_sigma=feed_sigma,
+        compression=compression,
+        force=force,
+        input_key=input_keys[0],
+        input_keys=input_keys,
+    )
+    return build_standardized_h5(
+        preprocessed_h5_path=preprocessed_h5_path,
+        input_keys=input_keys,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+        compression=compression,
+        force=force,
+    )
+
+
+def ensure_standardized_dataset(
+    h5_path,
+    input_keys=None,
+    feed_sigma=2.0,
+    compression="lzf",
+    train_ratio=0.8,
+    val_ratio=0.1,
+    test_ratio=0.1,
+    seed=106,
+):
+    """Return a standardized HDF5 path, creating missing preprocessing outputs."""
+    input_keys = input_keys or ["X", "current"]
+
+    if os.path.isfile(h5_path):
+        if h5_path.endswith(".preprocessed.standardized.h5"):
+            return h5_path
+
+        if h5_path.endswith(".preprocessed.h5"):
+            standardized_h5_path = get_standardized_h5_path(h5_path)
+            if os.path.isfile(standardized_h5_path):
+                return standardized_h5_path
+            standardized_h5_path, _ = build_standardized_h5(
+                preprocessed_h5_path=h5_path,
+                standardized_h5_path=standardized_h5_path,
+                input_keys=input_keys,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+                seed=seed,
+                compression=compression,
+                force=False,
+            )
+            return standardized_h5_path
+
+        preprocessed_h5_path = get_preprocessed_h5_path(h5_path)
+        standardized_h5_path = get_standardized_h5_path(preprocessed_h5_path)
+        if os.path.isfile(standardized_h5_path):
+            return standardized_h5_path
+        standardized_h5_path, _ = preprocess_dataset(
+            src_h5_path=h5_path,
+            input_keys=input_keys,
+            feed_sigma=feed_sigma,
+            compression=compression,
+            force=False,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+        )
+        return standardized_h5_path
+
+    preprocessed_h5_path = get_preprocessed_h5_path_from_standardized_path(h5_path)
+    if os.path.isfile(preprocessed_h5_path):
+        standardized_h5_path, _ = build_standardized_h5(
+            preprocessed_h5_path=preprocessed_h5_path,
+            standardized_h5_path=h5_path,
+            input_keys=input_keys,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            compression=compression,
+            force=False,
+        )
+        return standardized_h5_path
+
+    raw_h5_path = get_raw_h5_path_from_standardized_path(h5_path)
+    if not os.path.isfile(raw_h5_path):
+        raise FileNotFoundError(
+            "Neither standardized, preprocessed, nor raw HDF5 dataset exists: "
+            f"standardized={h5_path}, preprocessed={preprocessed_h5_path}, raw={raw_h5_path}"
+        )
+
+    standardized_h5_path, _ = preprocess_dataset(
+        src_h5_path=raw_h5_path,
+        input_keys=input_keys,
+        feed_sigma=feed_sigma,
+        compression=compression,
+        force=False,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+    return standardized_h5_path
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Preprocess antenna HDF5 dataset")
+    parser.add_argument(
+        "h5_path",
+        nargs="?",
+        default=DEFAULT_PREPROCESS_CONFIG["h5_path"],
+        help="Raw MATLAB-layout .h5 path",
+    )
+    parser.add_argument(
+        "--input_keys",
+        default=",".join(DEFAULT_PREPROCESS_CONFIG["input_keys"]),
+        help="Comma-separated inputs to preprocess",
+    )
+    parser.add_argument("--feed_sigma", type=float, default=DEFAULT_PREPROCESS_CONFIG["feed_sigma"])
+    parser.add_argument("--compression", default=DEFAULT_PREPROCESS_CONFIG["compression"])
+    parser.add_argument("--force", action="store_true", default=DEFAULT_PREPROCESS_CONFIG["force"])
+    parser.add_argument("--train_ratio", type=float, default=DEFAULT_PREPROCESS_CONFIG["train_ratio"])
+    parser.add_argument("--val_ratio", type=float, default=DEFAULT_PREPROCESS_CONFIG["val_ratio"])
+    parser.add_argument("--test_ratio", type=float, default=DEFAULT_PREPROCESS_CONFIG["test_ratio"])
+    parser.add_argument("--seed", type=int, default=DEFAULT_PREPROCESS_CONFIG["seed"])
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    input_keys = [part.strip() for part in args.input_keys.split(",") if part.strip()]
+    preprocess_dataset(
+        src_h5_path=args.h5_path,
+        input_keys=input_keys,
+        feed_sigma=args.feed_sigma,
+        compression=args.compression,
+        force=args.force,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed,
+    )
+
+
+if __name__ == "__main__":
+    main()
