@@ -41,7 +41,7 @@ sim_params.pattern_phi_yoz = 90;
 
 overlap_mm = 5e-3;
 meshLambdaFraction = 20;
-randomSeed = 1;
+randomSeed = 100;
 metalFillFactor = 0.6;
 minFinalFillRateForDemo = 0.20;
 maxDesignTries = 200;
