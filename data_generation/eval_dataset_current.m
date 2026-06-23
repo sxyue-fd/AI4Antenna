@@ -1,12 +1,14 @@
-% eval_dataset_current.m
+% eval_dataset_current_signed_log_clip_zscore_eval.m
 % 评估 HDF5 数据集中的 /current 电流数据。
 %
 % 功能：
 %   1) 随机抽样若干天线，统计 |current| 的全局分位数，并直接打印到终端；
-%   2) 新增 tail ratio、zero ratio、signed raw current std、asinh-scaled std；
+%   2) 新增 tail ratio、zero ratio、signed raw current std、signed-log-scaled std；
 %   3) 显示全局电流幅值直方图 global_histograms；
-%   4) 显示 asinh(J / p95_abs) 后的 signed histogram，用于判断是否适合 asinh + z-score；
-%   5) 显示不同频点、不同通道的 signed raw current std；
+%   4) 显示 signed_log(J / p95_abs) 后的 signed histogram，并叠加 clip 前后曲线；
+%   5) 新增 signed-log、signed-log + clip、signed-log + clip + z-score 的分位数统计；
+%   6) 显示 signed-log + z-score histogram，并叠加 clip 前后曲线；
+%   7) 显示不同频点、不同通道的 signed raw current std；
 %   6) 显示中间频点的逐像素 q99 图 pixel_q99_mid_frequency；
 %   7) 统计每张电流图的最大值 max(abs(current))，并按频点、通道显示直方图；
 %   8) 随机选取 3 个天线样本，显示 8/10/12 GHz 下 Jx_real 的线性尺度和 signed-log 尺度电流图；
@@ -16,7 +18,7 @@ clear; clc; close all;
 
 %% 用户配置
 h5path = '';                         % 留空：自动寻找最新的含 /current 的 HDF5 文件
-sample_count_target = 2000;          % 用于统计的随机样本数
+sample_count_target = 100000;          % 用于统计的随机样本数
 rng_seed = 42;                      % 随机种子，方便复现实验
 
 target_freq_ghz = [8 10 12];         % 需要绘图的频率
@@ -29,9 +31,16 @@ edge_probe_sample_count = 64;        % 估计直方图边界时使用的样本�
 pixel_q_prob = 0.99;                 % pixel_q99_mid_frequency 对应的分位数
 
 zero_eps_factor = 1e-6;              % near-zero 阈值 = max(1e-12, p99(abs(J))*zero_eps_factor)
-asinh_alpha_prob = 0.95;             % asinh 压缩尺度 alpha = p95(abs(J))
-asinh_hist_bins = 120;               % asinh-scaled histogram 箱数
-asinh_hist_limit = 8;                % asinh histogram 显示范围 [-limit, limit]，范围外单独计数
+signed_log_alpha_prob = 0.95;             % signed-log 压缩尺度 alpha = p95(abs(J))
+signed_log_clip_T = 4.0;                  % signed-log 域 clip 阈值：Y_clip = clip(Y, -T, T)
+signed_log_hist_bins = 120;               % signed-log-scaled histogram 箱数
+signed_log_hist_limit = 8;                % signed-log histogram 显示范围 [-limit, limit]，范围外单独计数
+
+% signed-log / signed-log+clip / z-score 后的分位数统计。
+transform_abs_quantile_probs = [0.50 0.90 0.95 0.99 0.999 0.9999 0.99995 0.99999 1];
+zscore_abs_quantile_probs = transform_abs_quantile_probs;
+zscore_hist_bins = 160;                   % z-score histogram 箱数
+zscore_hist_limit = 12;                   % z-score histogram 显示范围 [-limit, limit]，范围外单独计数
 
 max_hist_bins = 100;                 % 每张电流图最大值主体区间直方图箱数
 max_hist_detail_limit = 100;        % 主体区间上限；超过该值的电流图最大值单独计数
@@ -111,12 +120,18 @@ edge_hi = max(edge_hi, eps);
 hist_edges = [linspace(0, edge_hi, num_bins), inf];
 hist_bin_centers = 0.5 * (hist_edges(1:end-2) + hist_edges(2:end-1));
 
-asinh_hist_edges = linspace(-asinh_hist_limit, asinh_hist_limit, asinh_hist_bins + 1);
-asinh_hist_bin_centers = 0.5 * (asinh_hist_edges(1:end-1) + asinh_hist_edges(2:end));
+signed_log_hist_edges = linspace(-signed_log_hist_limit, signed_log_hist_limit, signed_log_hist_bins + 1);
+signed_log_hist_bin_centers = 0.5 * (signed_log_hist_edges(1:end-1) + signed_log_hist_edges(2:end));
+
+zscore_hist_edges = linspace(-zscore_hist_limit, zscore_hist_limit, zscore_hist_bins + 1);
+zscore_hist_bin_centers = 0.5 * (zscore_hist_edges(1:end-1) + zscore_hist_edges(2:end));
 
 fprintf('全局直方图范围：0 到 %.6g，最后一个箱用于统计超过该范围的值。\n', edge_hi);
-fprintf('asinh-scaled histogram 范围：[-%.6g, %.6g]，范围外单独计数。\n\n', ...
-    asinh_hist_limit, asinh_hist_limit);
+fprintf('signed-log-scaled histogram 范围：[-%.6g, %.6g]，范围外单独计数。\n', ...
+    signed_log_hist_limit, signed_log_hist_limit);
+fprintf('signed-log clip 阈值：T = %.6g，即 Y_clip = min(max(Y, -T), T)。\n', signed_log_clip_T);
+fprintf('signed-log + z-score histogram 范围：[-%.6g, %.6g]，范围外单独计数。\n\n', ...
+    zscore_hist_limit, zscore_hist_limit);
 
 %% 主统计
 tic_eval = tic;
@@ -125,7 +140,7 @@ hist_counts_global = zeros(num_bins, Fc, Cc, 'uint64');
 pixel_q_mid = zeros(Cc, fineN, fineN, 'single');
 current_map_max = zeros(sample_count, Fc, Cc, 'single');
 
-% 标准化相关统计：这些指标用于判断是否适合直接 z-score，或是否需要 asinh + z-score。
+% 标准化相关统计：这些指标用于判断是否适合直接 z-score，或是否需要 signed-log + z-score。
 raw_std_fc = zeros(Fc, Cc, 'single');
 abs_p50_fc = zeros(Fc, Cc, 'single');
 abs_p95_fc = zeros(Fc, Cc, 'single');
@@ -133,11 +148,33 @@ abs_p99_fc = zeros(Fc, Cc, 'single');
 abs_p999_fc = zeros(Fc, Cc, 'single');
 zero_ratio_fc = zeros(Fc, Cc, 'single');
 tail_ratio_fc = zeros(Fc, Cc, 'single');
-asinh_alpha_fc = zeros(Fc, Cc, 'single');
-asinh_std_fc = zeros(Fc, Cc, 'single');
-asinh_hist_counts = zeros(asinh_hist_bins, Fc, Cc, 'uint64');
-asinh_hist_underflow = zeros(Fc, Cc, 'uint64');
-asinh_hist_overflow = zeros(Fc, Cc, 'uint64');
+signed_log_alpha_fc = zeros(Fc, Cc, 'single');
+signed_log_mean_fc = zeros(Fc, Cc, 'single');
+signed_log_std_fc = zeros(Fc, Cc, 'single');
+signed_log_hist_counts = zeros(signed_log_hist_bins, Fc, Cc, 'uint64');
+signed_log_hist_underflow = zeros(Fc, Cc, 'uint64');
+signed_log_hist_overflow = zeros(Fc, Cc, 'uint64');
+signed_log_abs_quantiles = zeros(numel(transform_abs_quantile_probs), Fc, Cc, 'single');
+
+% signed-log + clip 后的统计：clip 在 signed-log 域进行，后续 mu/std 应基于 clipped Y 计算。
+signed_log_clip_T_fc = single(signed_log_clip_T * ones(Fc, Cc));
+signed_log_clip_mean_fc = zeros(Fc, Cc, 'single');
+signed_log_clip_std_fc = zeros(Fc, Cc, 'single');
+signed_log_clip_abs_quantiles = zeros(numel(transform_abs_quantile_probs), Fc, Cc, 'single');
+signed_log_clip_ratio_fc = zeros(Fc, Cc, 'single');
+signed_log_clip_hist_counts = zeros(signed_log_hist_bins, Fc, Cc, 'uint64');
+signed_log_clip_hist_underflow = zeros(Fc, Cc, 'uint64');
+signed_log_clip_hist_overflow = zeros(Fc, Cc, 'uint64');
+
+% signed-log + z-score 后的统计：分别保存 no clip 和 clip 后的版本。
+zscore_abs_quantiles = zeros(numel(zscore_abs_quantile_probs), Fc, Cc, 'single');
+zscore_hist_counts = zeros(zscore_hist_bins, Fc, Cc, 'uint64');
+zscore_hist_underflow = zeros(Fc, Cc, 'uint64');
+zscore_hist_overflow = zeros(Fc, Cc, 'uint64');
+zscore_clip_abs_quantiles = zeros(numel(zscore_abs_quantile_probs), Fc, Cc, 'single');
+zscore_clip_hist_counts = zeros(zscore_hist_bins, Fc, Cc, 'uint64');
+zscore_clip_hist_underflow = zeros(Fc, Cc, 'uint64');
+zscore_clip_hist_overflow = zeros(Fc, Cc, 'uint64');
 
 for kf = 1:Fc
     raw = read_current_frequency(h5path, sample_idx, kf, Cc, fineN);        % [sample, channel, x, y], signed current
@@ -158,7 +195,7 @@ for kf = 1:Fc
 
         % 幅值分位数和长尾指标。
         abs_p50 = percentile_vector(v, 0.50);
-        abs_p95 = percentile_vector(v, asinh_alpha_prob);
+        abs_p95 = percentile_vector(v, signed_log_alpha_prob);
         abs_p99 = percentile_vector(v, 0.99);
         abs_p999 = percentile_vector(v, 0.999);
 
@@ -171,15 +208,47 @@ for kf = 1:Fc
         zero_ratio_fc(kf, cc) = single(mean(v < zero_eps));
         tail_ratio_fc(kf, cc) = single(abs_p999 / max(abs_p50, 1e-12));
 
-        % asinh 压缩后的 signed histogram 和 std。
+        % signed-log 压缩后的 signed histogram 和 std。
         alpha = max(abs_p95, 1e-12);
-        x_asinh = asinh(x / alpha);
+        x_signed_log = signed_log_transform(x, alpha);
 
-        asinh_alpha_fc(kf, cc) = single(alpha);
-        asinh_std_fc(kf, cc) = single(std(x_asinh));
-        asinh_hist_counts(:, kf, cc) = uint64(histcounts(x_asinh, asinh_hist_edges).');
-        asinh_hist_underflow(kf, cc) = uint64(nnz(x_asinh < asinh_hist_edges(1)));
-        asinh_hist_overflow(kf, cc) = uint64(nnz(x_asinh > asinh_hist_edges(end)));
+        signed_log_mu = mean(x_signed_log);
+        signed_log_sigma = std(x_signed_log);
+        signed_log_sigma = max(signed_log_sigma, eps);
+        x_zscore = (x_signed_log - signed_log_mu) ./ signed_log_sigma;
+
+        % 在 signed-log 域做 clip：Y_clip = clip(Y, -T, T)。
+        x_signed_log_clip = clip_symmetric(x_signed_log, signed_log_clip_T);
+        signed_log_clip_mu = mean(x_signed_log_clip);
+        signed_log_clip_sigma = std(x_signed_log_clip);
+        signed_log_clip_sigma = max(signed_log_clip_sigma, eps);
+        x_zscore_clip = (x_signed_log_clip - signed_log_clip_mu) ./ signed_log_clip_sigma;
+
+        signed_log_alpha_fc(kf, cc) = single(alpha);
+        signed_log_mean_fc(kf, cc) = single(signed_log_mu);
+        signed_log_std_fc(kf, cc) = single(signed_log_sigma);
+        signed_log_abs_quantiles(:, kf, cc) = single(percentile_vector(abs(x_signed_log), transform_abs_quantile_probs));
+        signed_log_hist_counts(:, kf, cc) = uint64(histcounts(x_signed_log, signed_log_hist_edges).');
+        signed_log_hist_underflow(kf, cc) = uint64(nnz(x_signed_log < signed_log_hist_edges(1)));
+        signed_log_hist_overflow(kf, cc) = uint64(nnz(x_signed_log > signed_log_hist_edges(end)));
+
+        signed_log_clip_mean_fc(kf, cc) = single(signed_log_clip_mu);
+        signed_log_clip_std_fc(kf, cc) = single(signed_log_clip_sigma);
+        signed_log_clip_abs_quantiles(:, kf, cc) = single(percentile_vector(abs(x_signed_log_clip), transform_abs_quantile_probs));
+        signed_log_clip_ratio_fc(kf, cc) = single(mean(abs(x_signed_log) > signed_log_clip_T));
+        signed_log_clip_hist_counts(:, kf, cc) = uint64(histcounts(x_signed_log_clip, signed_log_hist_edges).');
+        signed_log_clip_hist_underflow(kf, cc) = uint64(nnz(x_signed_log_clip < signed_log_hist_edges(1)));
+        signed_log_clip_hist_overflow(kf, cc) = uint64(nnz(x_signed_log_clip > signed_log_hist_edges(end)));
+
+        zscore_abs_quantiles(:, kf, cc) = single(percentile_vector(abs(x_zscore), zscore_abs_quantile_probs));
+        zscore_hist_counts(:, kf, cc) = uint64(histcounts(x_zscore, zscore_hist_edges).');
+        zscore_hist_underflow(kf, cc) = uint64(nnz(x_zscore < zscore_hist_edges(1)));
+        zscore_hist_overflow(kf, cc) = uint64(nnz(x_zscore > zscore_hist_edges(end)));
+
+        zscore_clip_abs_quantiles(:, kf, cc) = single(percentile_vector(abs(x_zscore_clip), zscore_abs_quantile_probs));
+        zscore_clip_hist_counts(:, kf, cc) = uint64(histcounts(x_zscore_clip, zscore_hist_edges).');
+        zscore_clip_hist_underflow(kf, cc) = uint64(nnz(x_zscore_clip < zscore_hist_edges(1)));
+        zscore_clip_hist_overflow(kf, cc) = uint64(nnz(x_zscore_clip > zscore_hist_edges(end)));
     end
 
     if kf == mid_f
@@ -196,12 +265,25 @@ fprintf('分位数统计完成，耗时 %.1f 秒。\n\n', toc(tic_eval));
 %% 显示统计图，但不保存
 print_standardization_summary(current_freq_hz, channel_names, ...
     raw_std_fc, abs_p50_fc, abs_p95_fc, abs_p999_fc, ...
-    zero_ratio_fc, tail_ratio_fc, asinh_alpha_fc, asinh_std_fc);
+    zero_ratio_fc, tail_ratio_fc, signed_log_alpha_fc, signed_log_std_fc);
 
 show_global_histograms(current_freq_hz, channel_names, hist_bin_centers, hist_counts_global);
-show_asinh_scaled_histograms(current_freq_hz, channel_names, ...
-    asinh_hist_bin_centers, asinh_hist_counts, asinh_hist_underflow, asinh_hist_overflow);
-show_channel_std_by_frequency(current_freq_hz, channel_names, raw_std_fc, asinh_std_fc);
+print_signed_log_clip_summary(current_freq_hz, channel_names, transform_abs_quantile_probs, signed_log_clip_T_fc, ...
+    signed_log_mean_fc, signed_log_std_fc, signed_log_abs_quantiles, ...
+    signed_log_clip_mean_fc, signed_log_clip_std_fc, signed_log_clip_abs_quantiles, signed_log_clip_ratio_fc);
+show_signed_log_scaled_histograms(current_freq_hz, channel_names, ...
+    signed_log_hist_bin_centers, signed_log_hist_counts, signed_log_hist_underflow, signed_log_hist_overflow, ...
+    signed_log_clip_hist_counts, signed_log_clip_hist_underflow, signed_log_clip_hist_overflow, signed_log_clip_T);
+print_zscore_quantile_summary(current_freq_hz, channel_names, zscore_abs_quantile_probs, ...
+    signed_log_mean_fc, signed_log_std_fc, zscore_abs_quantiles, ...
+    zscore_hist_underflow, zscore_hist_overflow);
+print_zscore_clip_quantile_summary(current_freq_hz, channel_names, zscore_abs_quantile_probs, ...
+    signed_log_clip_mean_fc, signed_log_clip_std_fc, zscore_clip_abs_quantiles, ...
+    zscore_clip_hist_underflow, zscore_clip_hist_overflow, signed_log_clip_T);
+show_zscore_histograms(current_freq_hz, channel_names, zscore_hist_bin_centers, ...
+    zscore_hist_counts, zscore_hist_underflow, zscore_hist_overflow, ...
+    zscore_clip_hist_counts, zscore_clip_hist_underflow, zscore_clip_hist_overflow, signed_log_clip_T);
+show_channel_std_by_frequency(current_freq_hz, channel_names, raw_std_fc, signed_log_std_fc);
 show_pixel_q99_mid_frequency(current_freq_hz, channel_names, pixel_q_mid, mid_f, pixel_q_prob, plot_color_percentile);
 print_current_map_max_summary(current_map_max, quantile_probs);
 show_current_map_max_histogram(current_map_max, max_hist_bins, max_hist_detail_limit);
@@ -361,13 +443,13 @@ end
 fprintf('\n');
 end
 
-function print_standardization_summary(current_freq_hz, channel_names, raw_std_fc, abs_p50_fc, abs_p95_fc, abs_p999_fc, zero_ratio_fc, tail_ratio_fc, asinh_alpha_fc, asinh_std_fc)
+function print_standardization_summary(current_freq_hz, channel_names, raw_std_fc, abs_p50_fc, abs_p95_fc, abs_p999_fc, zero_ratio_fc, tail_ratio_fc, signed_log_alpha_fc, signed_log_std_fc)
 % 打印标准化相关指标。
 % tail_ratio = p99.9(abs(J)) / p50(abs(J))，数值越大，长尾越明显。
 % zero_ratio = mean(abs(J) < max(1e-12, p99(abs(J))*zero_eps_factor))。
 fprintf('=== 标准化相关统计：tail ratio / zero ratio / std ===\n');
 fprintf('%-10s %-12s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n', ...
-    'freqGHz', 'channel', 'raw_std', 'abs_p50', 'abs_p95', 'abs_p999', 'tail', 'zero', 'asinh_std');
+    'freqGHz', 'channel', 'raw_std', 'abs_p50', 'abs_p95', 'abs_p999', 'tail', 'zero', 'signed_log_std');
 
 [Fc, Cc] = size(raw_std_fc);
 for kf = 1:Fc
@@ -383,14 +465,14 @@ for kf = 1:Fc
             double(raw_std_fc(kf, cc)), double(abs_p50_fc(kf, cc)), ...
             double(abs_p95_fc(kf, cc)), double(abs_p999_fc(kf, cc)), ...
             double(tail_ratio_fc(kf, cc)), double(zero_ratio_fc(kf, cc)), ...
-            double(asinh_std_fc(kf, cc)));
+            double(signed_log_std_fc(kf, cc)));
     end
 end
 
 fprintf('\n说明：tail > 50 通常说明长尾明显；zero > 0.3 说明近零区域较多；raw_std 可用于比较不同通道尺度。\n');
-fprintf('asinh alpha 使用 p95(abs(J))，后续若采用 asinh + z-score，可把 alpha/mean/std 只在 train set 上重新拟合。\n\n');
+fprintf('signed-log alpha 使用 p95(abs(J))，后续若采用 signed-log + z-score，可把 alpha/mean/std 只在 train set 上重新拟合。\n\n');
 
-fprintf('=== asinh alpha = p95(abs(J)) ===\n');
+fprintf('=== signed-log alpha = p95(abs(J)) ===\n');
 fprintf('%-10s', 'freqGHz');
 for cc = 1:Cc
     fprintf(' %-12s', channel_names{cc});
@@ -405,11 +487,172 @@ for kf = 1:Fc
     end
     fprintf('%-10.6g', freq_ghz);
     for cc = 1:Cc
-        fprintf(' %-12.4g', double(asinh_alpha_fc(kf, cc)));
+        fprintf(' %-12.4g', double(signed_log_alpha_fc(kf, cc)));
     end
     fprintf('\n');
 end
 fprintf('\n');
+end
+
+
+
+function print_signed_log_clip_summary(current_freq_hz, channel_names, transform_abs_quantile_probs, clip_T_fc, ...
+    signed_log_mean_fc, signed_log_std_fc, signed_log_abs_quantiles, ...
+    signed_log_clip_mean_fc, signed_log_clip_std_fc, signed_log_clip_abs_quantiles, clip_ratio_fc)
+% 打印 signed-log 以及 signed-log + clip 后 abs(Y) 的分位数。
+% 这里的 Y = sign(J).*log(1+abs(J)/alpha)，clip 在 Y 域执行。
+fprintf('=== signed-log 后 abs(Y) 分位数统计，无 clip ===\n');
+fprintf('%-10s %-12s %-12s %-12s', 'freqGHz', 'channel', 'log_mean', 'log_std');
+for iq = 1:numel(transform_abs_quantile_probs)
+    fprintf(' absY_q%-8.5g', transform_abs_quantile_probs(iq));
+end
+fprintf('\n');
+
+[Fc, Cc] = size(signed_log_std_fc);
+for kf = 1:Fc
+    if numel(current_freq_hz) >= kf
+        freq_ghz = current_freq_hz(kf) / 1e9;
+    else
+        freq_ghz = kf;
+    end
+
+    for cc = 1:Cc
+        fprintf('%-10.6g %-12s %-12.4g %-12.4g', ...
+            freq_ghz, channel_names{cc}, ...
+            double(signed_log_mean_fc(kf, cc)), double(signed_log_std_fc(kf, cc)));
+        for iq = 1:numel(transform_abs_quantile_probs)
+            fprintf(' %-15.4g', double(signed_log_abs_quantiles(iq, kf, cc)));
+        end
+        fprintf('\n');
+    end
+end
+fprintf('\n');
+
+fprintf('=== signed-log + clip 后 abs(Y_clip) 分位数统计，T=%.6g ===\n', double(clip_T_fc(1,1)));
+fprintf('%-10s %-12s %-12s %-12s %-12s', 'freqGHz', 'channel', 'clip_T', 'clip_mean', 'clip_std');
+for iq = 1:numel(transform_abs_quantile_probs)
+    fprintf(' absYc_q%-8.5g', transform_abs_quantile_probs(iq));
+end
+fprintf(' clip_ratio\n');
+
+for kf = 1:Fc
+    if numel(current_freq_hz) >= kf
+        freq_ghz = current_freq_hz(kf) / 1e9;
+    else
+        freq_ghz = kf;
+    end
+
+    for cc = 1:Cc
+        fprintf('%-10.6g %-12s %-12.4g %-12.4g %-12.4g', ...
+            freq_ghz, channel_names{cc}, double(clip_T_fc(kf, cc)), ...
+            double(signed_log_clip_mean_fc(kf, cc)), double(signed_log_clip_std_fc(kf, cc)));
+        for iq = 1:numel(transform_abs_quantile_probs)
+            fprintf(' %-15.4g', double(signed_log_clip_abs_quantiles(iq, kf, cc)));
+        end
+        fprintf(' %-12.4g\n', double(clip_ratio_fc(kf, cc)));
+    end
+end
+
+fprintf('\n说明：clip_ratio = mean(abs(Y)>T)。若 q99/q999 基本不变、q1 被压到 T、clip_ratio 很低，说明 clip 主要处理极端异常点。\n\n');
+end
+
+function print_zscore_quantile_summary(current_freq_hz, channel_names, zscore_abs_quantile_probs, signed_log_mean_fc, signed_log_std_fc, zscore_abs_quantiles, underflow_counts, overflow_counts)
+% 打印 signed-log + z-score 后 abs(Z) 的分位数。
+% 这里不做 clip，因此这些分位数用于判断 transformed target 是否仍存在过大的标准化值。
+fprintf('=== signed-log + z-score 后 abs(Z) 分位数统计，无 clip ===\n');
+fprintf('%-10s %-12s %-12s %-12s', 'freqGHz', 'channel', 'log_mean', 'log_std');
+for iq = 1:numel(zscore_abs_quantile_probs)
+    fprintf(' absZ_q%-8.5g', zscore_abs_quantile_probs(iq));
+end
+fprintf(' under%-8s over%-8s\n', '', '');
+
+[Fc, Cc] = size(signed_log_std_fc);
+for kf = 1:Fc
+    if numel(current_freq_hz) >= kf
+        freq_ghz = current_freq_hz(kf) / 1e9;
+    else
+        freq_ghz = kf;
+    end
+
+    for cc = 1:Cc
+        fprintf('%-10.6g %-12s %-12.4g %-12.4g', ...
+            freq_ghz, channel_names{cc}, ...
+            double(signed_log_mean_fc(kf, cc)), double(signed_log_std_fc(kf, cc)));
+        for iq = 1:numel(zscore_abs_quantile_probs)
+            fprintf(' %-15.4g', double(zscore_abs_quantiles(iq, kf, cc)));
+        end
+        fprintf(' %-12g %-12g\n', double(underflow_counts(kf, cc)), double(overflow_counts(kf, cc)));
+    end
+end
+
+fprintf('\n建议观察：abs(Z) q99 < 4~5，q99.9 < 6~8，q99.99 < 8~10；若 max 长期 > 12~15，后续可考虑在 signed-log 域做 clip。\n\n');
+end
+
+
+function print_zscore_clip_quantile_summary(current_freq_hz, channel_names, zscore_abs_quantile_probs, signed_log_clip_mean_fc, signed_log_clip_std_fc, zscore_clip_abs_quantiles, underflow_counts, overflow_counts, clip_T)
+% 打印 signed-log + clip + z-score 后 abs(Z_clip) 的分位数。
+% z-score 的 mean/std 基于 clipped Y 重新计算，不使用 no-clip 的 mean/std。
+fprintf('=== signed-log + clip + z-score 后 abs(Z_clip) 分位数统计，T=%.6g ===\n', clip_T);
+fprintf('%-10s %-12s %-12s %-12s', 'freqGHz', 'channel', 'clip_mean', 'clip_std');
+for iq = 1:numel(zscore_abs_quantile_probs)
+    fprintf(' absZc_q%-8.5g', zscore_abs_quantile_probs(iq));
+end
+fprintf(' under%-8s over%-8s\n', '', '');
+
+[Fc, Cc] = size(signed_log_clip_std_fc);
+for kf = 1:Fc
+    if numel(current_freq_hz) >= kf
+        freq_ghz = current_freq_hz(kf) / 1e9;
+    else
+        freq_ghz = kf;
+    end
+
+    for cc = 1:Cc
+        fprintf('%-10.6g %-12s %-12.4g %-12.4g', ...
+            freq_ghz, channel_names{cc}, ...
+            double(signed_log_clip_mean_fc(kf, cc)), double(signed_log_clip_std_fc(kf, cc)));
+        for iq = 1:numel(zscore_abs_quantile_probs)
+            fprintf(' %-15.4g', double(zscore_clip_abs_quantiles(iq, kf, cc)));
+        end
+        fprintf(' %-12g %-12g\n', double(underflow_counts(kf, cc)), double(overflow_counts(kf, cc)));
+    end
+end
+
+fprintf('\n目标：clip 后 abs(Z_clip) 的 q99/q999 应基本接近 no-clip；q1 应被限制到约 (T-mu)/std，通常约 12~13。\n\n');
+end
+
+function show_zscore_histograms(current_freq_hz, channel_names, hist_bin_centers, zscore_hist_counts, underflow_counts, overflow_counts, zscore_clip_hist_counts, clip_underflow_counts, clip_overflow_counts, clip_T)
+% 显示 signed-log + z-score 后的 signed Z histogram。
+% 每个子图叠加 no clip 和 clip 后的曲线；范围外点用 under/over 计数显示在标题中。
+fig = figure('Color', 'w', 'Name', 'signed_log_zscore_histograms');
+tiledlayout(fig, 2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+Cc = numel(channel_names);
+for cc = 1:Cc
+    nexttile;
+    counts = double(sum(zscore_hist_counts(:, :, cc), 2));
+    counts_clip = double(sum(zscore_clip_hist_counts(:, :, cc), 2));
+    underflow = double(sum(underflow_counts(:, cc), 1));
+    overflow = double(sum(overflow_counts(:, cc), 1));
+    underflow_clip = double(sum(clip_underflow_counts(:, cc), 1));
+    overflow_clip = double(sum(clip_overflow_counts(:, cc), 1));
+
+    hold on;
+    stairs(hist_bin_centers, counts, 'LineWidth', 1.3, 'DisplayName', 'no clip');
+    stairs(hist_bin_centers, counts_clip, 'LineWidth', 1.3, 'DisplayName', sprintf('clip T=%.3g', clip_T));
+    hold off;
+    set(gca, 'YScale', 'log');
+    grid on;
+    xlabel('Z');
+    ylabel('count');
+    title(sprintf('%s, noClip u/o=%g/%g, clip u/o=%g/%g', ...
+        channel_names{cc}, underflow, overflow, underflow_clip, overflow_clip), 'Interpreter', 'none');
+    legend('Location', 'best', 'Interpreter', 'none');
+end
+
+sgtitle(sprintf('signed-log + z-score histograms, %.6g-%.6g GHz, no clip vs clip', ...
+    min(current_freq_hz) / 1e9, max(current_freq_hz) / 1e9), 'Interpreter', 'none');
+drawnow;
 end
 
 function print_current_map_max_summary(current_map_max, quantile_probs)
@@ -457,34 +700,42 @@ sgtitle(sprintf('global histograms, %.6g-%.6g GHz', ...
 drawnow;
 end
 
-function show_asinh_scaled_histograms(current_freq_hz, channel_names, hist_bin_centers, asinh_hist_counts, underflow_counts, overflow_counts)
-% 显示 asinh(J / p95_abs) 后的 signed histogram。
-% 如果压缩后分布明显更集中、长尾不严重，通常适合后续再接 z-score。
-fig = figure('Color', 'w', 'Name', 'asinh_scaled_histograms');
+function show_signed_log_scaled_histograms(current_freq_hz, channel_names, hist_bin_centers, signed_log_hist_counts, underflow_counts, overflow_counts, signed_log_clip_hist_counts, clip_underflow_counts, clip_overflow_counts, clip_T)
+% 显示 signed_log(J / p95_abs) 后的 signed histogram。
+% 每个子图叠加 clip 前后的曲线，用于观察 T 是否只影响极端尾部。
+fig = figure('Color', 'w', 'Name', 'signed_log_scaled_histograms');
 tiledlayout(fig, 2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
 
 Cc = numel(channel_names);
 for cc = 1:Cc
     nexttile;
-    counts = double(sum(asinh_hist_counts(:, :, cc), 2));
+    counts = double(sum(signed_log_hist_counts(:, :, cc), 2));
+    counts_clip = double(sum(signed_log_clip_hist_counts(:, :, cc), 2));
     underflow = double(sum(underflow_counts(:, cc), 1));
     overflow = double(sum(overflow_counts(:, cc), 1));
+    underflow_clip = double(sum(clip_underflow_counts(:, cc), 1));
+    overflow_clip = double(sum(clip_overflow_counts(:, cc), 1));
 
-    stairs(hist_bin_centers, counts, 'LineWidth', 1.3);
+    hold on;
+    stairs(hist_bin_centers, counts, 'LineWidth', 1.3, 'DisplayName', 'no clip');
+    stairs(hist_bin_centers, counts_clip, 'LineWidth', 1.3, 'DisplayName', sprintf('clip T=%.3g', clip_T));
+    hold off;
     set(gca, 'YScale', 'log');
     grid on;
-    xlabel('asinh(J / p95(abs(J)))');
+    xlabel('signed_log(J / p95(abs(J)))');
     ylabel('count');
-    title(sprintf('%s, under=%g, over=%g', channel_names{cc}, underflow, overflow), 'Interpreter', 'none');
+    title(sprintf('%s, noClip u/o=%g/%g, clip u/o=%g/%g', ...
+        channel_names{cc}, underflow, overflow, underflow_clip, overflow_clip), 'Interpreter', 'none');
+    legend('Location', 'best', 'Interpreter', 'none');
 end
 
-sgtitle(sprintf('asinh-scaled signed histograms, %.6g-%.6g GHz', ...
+sgtitle(sprintf('signed-log-scaled signed histograms, %.6g-%.6g GHz, no clip vs clip', ...
     min(current_freq_hz) / 1e9, max(current_freq_hz) / 1e9), 'Interpreter', 'none');
 drawnow;
 end
 
-function show_channel_std_by_frequency(current_freq_hz, channel_names, raw_std_fc, asinh_std_fc)
-% 显示不同频点、不同通道的标准差。raw_std 看原始尺度；asinh_std 看压缩后的尺度。
+function show_channel_std_by_frequency(current_freq_hz, channel_names, raw_std_fc, signed_log_std_fc)
+% 显示不同频点、不同通道的标准差。raw_std 看原始尺度；signed_log_std 看压缩后的尺度。
 freq_ghz = current_freq_hz(:) / 1e9;
 Cc = numel(channel_names);
 
@@ -507,13 +758,13 @@ legend('Location', 'best', 'Interpreter', 'none');
 nexttile;
 hold on;
 for cc = 1:Cc
-    plot(freq_ghz, double(asinh_std_fc(:, cc)), '-o', 'LineWidth', 1.2, 'DisplayName', channel_names{cc});
+    plot(freq_ghz, double(signed_log_std_fc(:, cc)), '-o', 'LineWidth', 1.2, 'DisplayName', channel_names{cc});
 end
 hold off;
 grid on;
 xlabel('frequency (GHz)');
-ylabel('std of asinh(J / p95_abs)');
-title('asinh-scaled std by channel', 'Interpreter', 'none');
+ylabel('std of signed_log(J / p95_abs)');
+title('signed-log-scaled std by channel', 'Interpreter', 'none');
 legend('Location', 'best', 'Interpreter', 'none');
 
 drawnow;
@@ -553,6 +804,7 @@ v = double(current_map_max(:));
 v = v(isfinite(v) & v > 0);
 
 figure('Color', 'w', 'Name', 'current_map_max_all');
+overflow_count = 0;
 if isempty(v)
     histogram(0);
 else
@@ -639,9 +891,24 @@ for is = 1:numel(plot_idx)
 end
 end
 
+
+
+function y = clip_symmetric(x, T)
+% 对 transformed-domain 数据做对称硬截断。
+% y = min(max(x, -T), T)。
+y = min(max(x, -T), T);
+end
+
+function y = signed_log_transform(x, alpha)
+% 对 signed current 做自然对数形式的 signed-log 压缩：
+% y = sign(x) .* log(1 + abs(x) ./ alpha)。
+% 这里使用 natural log：y = sign(x) .* log(1 + abs(x)/alpha)。
+y = sign(x) .* log(1 + abs(x) ./ max(alpha, eps));
+end
+
 function img_log = signed_log_image(img, ref_value)
-% 对有正负号的 Jx_real 做对数压缩，同时保留电流方向符号。
-img_log = sign(img) .* log10(1 + abs(img) ./ max(ref_value, eps));
+% 对有正负号的 Jx_real 做 signed-log 压缩，同时保留电流方向符号。
+img_log = signed_log_transform(img, ref_value);
 end
 
 function lim = robust_positive_limit(v, prob)

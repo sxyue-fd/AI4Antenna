@@ -27,8 +27,8 @@ def resolve_project_relative_path(path):
 
 
 def get_default_config():
-    default_h5_path = os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.preprocessed.standardized.h5")
-
+    #default_h5_path = os.path.join(DATASETS_DIR, "antenna_dataset_20260408_150016.preprocessed.standardized.h5")
+    default_h5_path = os.path.join(DATASETS_DIR, "antenna_dataset_20260614_203654.preprocessed.standardized.h5")
     cfg = {
         "paths": {
             "h5_path": default_h5_path,

@@ -19,7 +19,7 @@ from datasets.split_loader import build_split_indices
 
 DEFAULT_PREPROCESS_CONFIG = {
     #"h5_path": os.path.join(_WORKSPACE_DIR, "datasets", "antenna_dataset_20260614_203654.h5"),
-    "h5_path": os.path.join(_WORKSPACE_DIR, "datasets", "antenna_dataset_20260408_150016.h5"),
+    "h5_path": os.path.join(_WORKSPACE_DIR, "datasets", "antenna_dataset_20260614_203654.h5"),
     "input_keys": ["X", "current"],
     "feed_sigma": 2.0,
     "compression": "lzf",
@@ -61,6 +61,21 @@ class TargetStandardizer:
         stats = self.input_stats.get(name)
         if stats is None:
             return x
+        if stats.get("transform") == "affine_01_to_m11":
+            return x * 2.0 - 1.0
+        if stats.get("transform") == "signed_log_clip_zscore":
+            alpha = stats["alpha"].to(x.device)
+            mean = stats["mean"].to(x.device)
+            std = stats["std"].to(x.device)
+            clip = float(stats["clip"])
+            if x.ndim == 3:  # CNN view: (F*C, H, W)
+                alpha, mean, std = (v.reshape(-1, 1, 1) for v in (alpha, mean, std))
+            elif x.ndim == 4:  # one stored sample: (F, C, H, W)
+                alpha, mean, std = (v.reshape(*v.shape, 1, 1) for v in (alpha, mean, std))
+            else:  # batch stored view: (N, F, C, H, W)
+                alpha, mean, std = (v.reshape(1, *v.shape, 1, 1) for v in (alpha, mean, std))
+            transformed = torch.sign(x) * torch.log1p(torch.abs(x) / alpha)
+            return (torch.clamp(transformed, -clip, clip) - mean) / std
         mean = stats["mean"].to(x.device)
         std = stats["std"].to(x.device)
         return (x - mean) / std
@@ -86,11 +101,13 @@ class TargetStandardizer:
         return p * p_std + p_mean
 
     def is_compatible(self, y_shape, p_shape, x_shape=None):
+        y_stats_shape = tuple(self.y_mean.shape)
+        p_stats_shape = tuple(self.p_mean.shape)
         target_ok = (
-            tuple(self.y_mean.shape) == tuple(y_shape)
-            and tuple(self.y_std.shape) == tuple(y_shape)
-            and tuple(self.p_mean.shape) == tuple(p_shape)
-            and tuple(self.p_std.shape) == tuple(p_shape)
+            y_stats_shape in {tuple(y_shape), (1,)}
+            and tuple(self.y_std.shape) == y_stats_shape
+            and p_stats_shape in {tuple(p_shape), tuple(p_shape[:-1]) + (1,)}
+            and tuple(self.p_std.shape) == p_stats_shape
         )
         if not target_ok:
             return False
@@ -124,8 +141,8 @@ class TargetStandardizer:
         if self.input_stats:
             state["input_stats"] = {
                 name: {
-                    "mean": stats["mean"].detach().cpu(),
-                    "std": stats["std"].detach().cpu(),
+                    key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
+                    for key, value in stats.items()
                 }
                 for name, stats in self.input_stats.items()
             }
@@ -145,8 +162,8 @@ class TargetStandardizer:
             x_std=state_dict.get("x_std", None).float() if state_dict.get("x_std", None) is not None else None,
             input_stats={
                 name: {
-                    "mean": stats["mean"].float(),
-                    "std": stats["std"].float(),
+                    key: value.float() if isinstance(value, torch.Tensor) else value
+                    for key, value in stats.items()
                 }
                 for name, stats in state_dict.get("input_stats", {}).items()
             },
@@ -264,65 +281,100 @@ def get_preprocessed_h5_path_from_standardized_path(standardized_h5_path):
     return standardized_h5_path
 
 
+def _is_current_standardized_h5(path):
+    try:
+        with h5py.File(path, "r") as f:
+            return f.attrs.get("preprocessing_schema") == "antenna-v2"
+    except OSError:
+        return False
+
+
 def _as_float_array(x):
     return np.asarray(x, dtype=np.float32)
 
 
-def _compute_mean_std(dataset, indices, input_keys):
-    sums = {key: None for key in input_keys}
-    sq_sums = {key: None for key in input_keys}
-    y_sum = y_sq = p_sum = p_sq = None
-    count = 0
+def _training_mask(num_samples, indices):
+    mask = np.zeros(num_samples, dtype=bool)
+    mask[np.asarray(indices, dtype=np.int64)] = True
+    return mask
 
-    datasets = {
-        key: H5AntennaDataset(dataset.h5_path, return_raw=False, input_key=key)
-        for key in input_keys
-    }
 
-    for idx in indices:
-        for key, key_dataset in datasets.items():
-            x, y, p, _ = key_dataset[int(idx)]
-            x = x.double()
-            if sums[key] is None:
-                sums[key] = torch.zeros_like(x)
-                sq_sums[key] = torch.zeros_like(x)
-            sums[key] += x
-            sq_sums[key] += x * x
+def _compute_mean_std(preprocessed_h5_path, indices, input_keys, chunk_size=256):
+    """Compute all statistics from training samples only, in their requested domains."""
+    with h5py.File(preprocessed_h5_path, "r") as f:
+        n = f["Y"].shape[0]
+        train_mask = _training_mask(n, indices)
+        y_sum = y_sq = 0.0
+        p_sum = p_sq = None
+        y_count = p_count = 0
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            selected = train_mask[start:end]
+            if not selected.any():
+                continue
+            y = np.asarray(f["Y"][start:end][selected], dtype=np.float64)
+            p = np.asarray(f["pattern"][start:end][selected], dtype=np.float64)
+            # S11: one scalar mean/std shared by all 41 frequencies.
+            y_sum += y.sum()
+            y_sq += np.square(y).sum()
+            y_count += y.size
+            # Pattern: reduce sample and theta axes, retain (F, C).
+            if p_sum is None:
+                p_sum = np.zeros(p.shape[1:3], dtype=np.float64)
+                p_sq = np.zeros_like(p_sum)
+            p_sum += p.sum(axis=(0, 3))
+            p_sq += np.square(p).sum(axis=(0, 3))
+            p_count += p.shape[0] * p.shape[3]
 
-        y = y.double()
-        p = p.double()
-        if count == 0:
-            y_sum = torch.zeros_like(y)
-            y_sq = torch.zeros_like(y)
-            p_sum = torch.zeros_like(p)
-            p_sq = torch.zeros_like(p)
-        y_sum += y
-        y_sq += y * y
-        p_sum += p
-        p_sq += p * p
-        count += 1
+        y_mean = np.asarray([y_sum / y_count], dtype=np.float32)
+        y_std = np.asarray([np.sqrt(max(y_sq / y_count - y_mean[0] ** 2, 1e-8))], dtype=np.float32)
+        p_mean = (p_sum / p_count)[..., None].astype(np.float32)
+        p_std = np.sqrt(np.maximum(p_sq / p_count - (p_sum / p_count) ** 2, 1e-8))[..., None].astype(np.float32)
 
-    y_mean = y_sum / count
-    p_mean = p_sum / count
-    y_std = torch.sqrt(torch.clamp(y_sq / count - y_mean**2, min=1e-8))
-    p_std = torch.sqrt(torch.clamp(p_sq / count - p_mean**2, min=1e-8))
+        input_stats = {}
+        if "X" in input_keys:
+            input_stats["X"] = {"transform": "affine_01_to_m11"}
 
-    input_stats = {}
-    for key in input_keys:
-        mean = sums[key] / count
-        std = torch.sqrt(torch.clamp(sq_sums[key] / count - mean**2, min=1e-8))
-        input_stats[key] = {
-            "mean": mean.float(),
-            "std": std.float(),
-        }
+        if "current" in input_keys:
+            current = f["current"]
+            if current.ndim != 5:
+                raise ValueError(f"/current must be (N,F,C,H,W), got {current.shape}")
+            _, nf, nc, _, _ = current.shape
+            alpha = np.empty((nf, nc), dtype=np.float32)
+            # p95 is exact, calculated independently per (frequency, component).
+            for fi in range(nf):
+                for ci in range(nc):
+                    values = []
+                    for start in range(0, n, chunk_size):
+                        end = min(start + chunk_size, n)
+                        selected = train_mask[start:end]
+                        if selected.any():
+                            values.append(np.abs(current[start:end, fi, ci][selected]).reshape(-1))
+                    alpha[fi, ci] = max(float(np.percentile(np.concatenate(values), 95)), 1e-8)
 
-    return TargetStandardizer(
-        y_mean.float(),
-        y_std.float(),
-        p_mean.float(),
-        p_std.float(),
-        input_stats=input_stats,
-    )
+            cur_sum = np.zeros((nf, nc), dtype=np.float64)
+            cur_sq = np.zeros_like(cur_sum)
+            cur_count = 0
+            for start in range(0, n, chunk_size):
+                end = min(start + chunk_size, n)
+                selected = train_mask[start:end]
+                if not selected.any():
+                    continue
+                j = np.asarray(current[start:end][selected], dtype=np.float64)
+                transformed = np.sign(j) * np.log1p(np.abs(j) / alpha[None, :, :, None, None])
+                transformed = np.clip(transformed, -4.0, 4.0)
+                cur_sum += transformed.sum(axis=(0, 3, 4))
+                cur_sq += np.square(transformed).sum(axis=(0, 3, 4))
+                cur_count += transformed.shape[0] * transformed.shape[3] * transformed.shape[4]
+            cur_mean = (cur_sum / cur_count).astype(np.float32)
+            cur_std = np.sqrt(np.maximum(cur_sq / cur_count - (cur_sum / cur_count) ** 2, 1e-8)).astype(np.float32)
+            input_stats["current"] = {
+                "transform": "signed_log_clip_zscore", "alpha": torch.from_numpy(alpha),
+                "clip": 4.0, "mean": torch.from_numpy(cur_mean), "std": torch.from_numpy(cur_std),
+            }
+
+    return TargetStandardizer(torch.from_numpy(y_mean), torch.from_numpy(y_std),
+                              torch.from_numpy(p_mean), torch.from_numpy(p_std), input_stats=input_stats)
 
 
 def _copy_metadata(src, dst):
@@ -365,9 +417,16 @@ def build_standardized_h5(
     standardizer_path = standardizer_path or get_unified_standardizer_path(preprocessed_h5_path)
 
     if os.path.isfile(standardized_h5_path) and os.path.isfile(standardizer_path) and not force:
-        print(f"[preprocess] reuse standardized h5: {standardized_h5_path}")
-        print(f"[preprocess] reuse standardizer: {standardizer_path}")
-        return standardized_h5_path, standardizer_path
+        try:
+            with h5py.File(standardized_h5_path, "r") as existing:
+                compatible = existing.attrs.get("preprocessing_schema") == "antenna-v2"
+            if compatible:
+                print(f"[preprocess] reuse standardized h5: {standardized_h5_path}")
+                print(f"[preprocess] reuse standardizer: {standardizer_path}")
+                return standardized_h5_path, standardizer_path
+            print("[preprocess] standardized cache uses an older preprocessing schema; rebuilding...")
+        except OSError:
+            pass
 
     base_dataset = H5AntennaDataset(preprocessed_h5_path, return_raw=False, input_key=input_keys[0])
     split = build_split_indices(
@@ -377,11 +436,7 @@ def build_standardized_h5(
         test_ratio=test_ratio,
         seed=seed,
     )
-    standardizer = _compute_mean_std(
-        base_dataset,
-        split["train"],
-        input_keys=input_keys,
-    )
+    standardizer = _compute_mean_std(preprocessed_h5_path, split["train"], input_keys=input_keys)
     standardizer.save(
         standardizer_path,
         extra={
@@ -397,6 +452,11 @@ def build_standardized_h5(
         _copy_metadata(src, dst)
         dst.attrs["preprocessed"] = True
         dst.attrs["standardized"] = True
+        dst.attrs["preprocessing_schema"] = "antenna-v2"
+        dst.attrs["x_transform"] = "2*x-1"
+        dst.attrs["current_transform"] = "signed_log(alpha=p95_train_per_f_c), clip=4, zscore_per_f_c"
+        dst.attrs["y_stats_scope"] = "global_train_samples_and_frequencies"
+        dst.attrs["pattern_stats_scope"] = "train_samples_and_theta_per_frequency_component"
         dst.attrs["standardizer_path"] = os.path.abspath(standardizer_path)
         dst.attrs["source_preprocessed_h5"] = os.path.abspath(preprocessed_h5_path)
         dst.attrs["preprocessed_inputs"] = ",".join(input_keys)
@@ -483,11 +543,24 @@ def ensure_standardized_dataset(
 
     if os.path.isfile(h5_path):
         if h5_path.endswith(".preprocessed.standardized.h5"):
-            return h5_path
+            if _is_current_standardized_h5(h5_path):
+                return h5_path
+            raw_h5_path = get_raw_h5_path_from_standardized_path(h5_path)
+            if not os.path.isfile(raw_h5_path):
+                raise RuntimeError(
+                    f"{h5_path} uses an obsolete preprocessing schema and source HDF5 is unavailable. "
+                    "Restore the raw dataset and rerun preprocessing."
+                )
+            standardized_h5_path, _ = preprocess_dataset(
+                src_h5_path=raw_h5_path, input_keys=input_keys, feed_sigma=feed_sigma,
+                compression=compression, force=False, train_ratio=train_ratio,
+                val_ratio=val_ratio, test_ratio=test_ratio, seed=seed,
+            )
+            return standardized_h5_path
 
         if h5_path.endswith(".preprocessed.h5"):
             standardized_h5_path = get_standardized_h5_path(h5_path)
-            if os.path.isfile(standardized_h5_path):
+            if os.path.isfile(standardized_h5_path) and _is_current_standardized_h5(standardized_h5_path):
                 return standardized_h5_path
             standardized_h5_path, _ = build_standardized_h5(
                 preprocessed_h5_path=h5_path,
@@ -504,7 +577,7 @@ def ensure_standardized_dataset(
 
         preprocessed_h5_path = get_preprocessed_h5_path(h5_path)
         standardized_h5_path = get_standardized_h5_path(preprocessed_h5_path)
-        if os.path.isfile(standardized_h5_path):
+        if os.path.isfile(standardized_h5_path) and _is_current_standardized_h5(standardized_h5_path):
             return standardized_h5_path
         standardized_h5_path, _ = preprocess_dataset(
             src_h5_path=h5_path,

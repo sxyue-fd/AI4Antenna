@@ -76,8 +76,9 @@ def normalize_current(current):
     if current.ndim != 4:
         raise ValueError(f"Expected current sample shape=(H,W,C,F), got {current.shape}")
     h, w, c, f = current.shape
-    current = np.transpose(current, (3, 2, 1, 0))
-    return current.reshape(f * c, w, h).astype(np.float32)
+    # Keep frequency and component axes explicit in the preprocessed file:
+    # (H, W, C, F) -> (F, C, W, H).
+    return np.transpose(current, (3, 2, 1, 0)).astype(np.float32)
 
 
 def normalize_y(y):
@@ -160,7 +161,7 @@ def infer_h5_layout(f, input_key="X"):
             if x_ds.ndim != 5:
                 raise ValueError(f"/current expected 5 dimensions, got {x_ds.shape}")
             h, w, c, f, n = x_ds.shape
-            x_shape = (int(c * f), int(w), int(h))
+            x_shape = (int(f), int(c), int(w), int(h))
         else:
             if x_ds.ndim != 4:
                 raise ValueError(f"/{input_name} expected 4 dimensions, got {x_ds.shape}")
@@ -210,7 +211,7 @@ def read_h5_dataset_info(h5_path, input_key="X"):
 
 
 class H5AntennaDataset(Dataset):
-    def __init__(self, h5_path, standardizer=None, feed_sigma=1.5, return_raw=True, input_key="X"):
+    def __init__(self, h5_path, standardizer=None, feed_sigma=1.5, return_raw=True, input_key="X", flatten_current=True):
         if not os.path.isfile(h5_path):
             raise FileNotFoundError(h5_path)
 
@@ -219,6 +220,7 @@ class H5AntennaDataset(Dataset):
         self.feed_sigma = feed_sigma
         self.return_raw = return_raw
         self.input_key = input_key.strip("/")
+        self.flatten_current = flatten_current
         self._h5 = None
 
         with h5py.File(h5_path, "r") as f:
@@ -233,6 +235,12 @@ class H5AntennaDataset(Dataset):
             self.is_standardized = self.layout == "standardized"
             self.n = layout["num_samples"]
             self.x_shape = layout["x_shape"]
+            self.storage_x_shape = layout["x_shape"]
+            # The HDF5 representation retains (F, C, H, W), while the
+            # existing surrogate backbone consumes Conv2d tensors (F*C,H,W).
+            if self.flatten_current and self.input_key == "current" and len(self.x_shape) == 4:
+                f, c, h, w = self.x_shape
+                self.x_shape = (f * c, h, w)
             self.y_shape = layout["y_shape"]
             self.pattern_shape = layout["pattern_shape"]
             self.source_shapes = layout["source_shapes"]
@@ -263,6 +271,8 @@ class H5AntennaDataset(Dataset):
             raise RuntimeError(f"Unsupported HDF5 layout: {self.layout}")
 
         x = torch.from_numpy(np.asarray(x, dtype=np.float32))
+        if self.flatten_current and self.input_key == "current" and x.ndim == 4:
+            x = x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
         y = torch.from_numpy(np.asarray(y, dtype=np.float32))
         p = torch.from_numpy(np.asarray(p, dtype=np.float32))
 

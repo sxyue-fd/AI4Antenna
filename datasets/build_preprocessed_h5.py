@@ -124,6 +124,8 @@ def build_preprocessed_h5(
         feed_sigma=feed_sigma,
         return_raw=False,
         input_key=input_key,
+        # Store current as (F, C, H, W); flattening is only a model-loader view.
+        flatten_current=False,
     )
     n = len(dataset)
     x0, y0, p0, _ = dataset[0]
