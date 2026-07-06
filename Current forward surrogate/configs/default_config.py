@@ -64,19 +64,19 @@ def get_default_config():
         },
 
         "optim": {
-            "lr": 1e-3,
-            "weight_decay": 1e-4,
+            "lr": 5e-3,
+            "weight_decay": 5e-4,
         },
 
         "scheduler": {
             "type": "cosine_annealing",
             "t_max": None,
-            "eta_min": 1e-6,
+            "eta_min": 5e-6,
         },
 
         "loss": {
-            "y_weight": 0.1,
-            "p_weight": 0.9,
+            "y_weight": 0.5,
+            "p_weight": 0.5,
         },
 
         "test": {
