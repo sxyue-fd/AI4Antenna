@@ -19,3 +19,4 @@ __pycache__/
 *.py[cod]
 forward_surrogate/ckpt/*
 !forward_surrogate/ckpt/.gitkeep
+Current to structure UNet/outputs/

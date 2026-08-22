@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import pprint
+import subprocess
 import sys
 import time
 
@@ -19,7 +20,30 @@ from engine.losses import build_loss
 from engine.trainer import evaluate, save_checkpoint, train_one_epoch, append_csv
 from models import CurrentToStructureUNet
 from utils.common import ensure_dir, make_run_dir, save_json, set_seed
-from utils.plot_loss import plot_iteration_val_accuracy, plot_training_loss
+
+
+_PLOT_SCRIPT = os.path.join(os.path.dirname(__file__), "plot_logs.py")
+
+
+def run_plot_process(kind, csv_path, output_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            _PLOT_SCRIPT,
+            "--kind",
+            kind,
+            "--csv",
+            csv_path,
+            "--output",
+            output_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(message or f"Plot process exited with {result.returncode}")
 
 
 def parse_args():
@@ -148,7 +172,7 @@ def main():
         }
         append_csv(log_csv, row)
         try:
-            plot_training_loss(log_csv, loss_curve_path)
+            run_plot_process("epoch", log_csv, loss_curve_path)
             if not loss_curve_announced:
                 print("Loss curve will be updated at:", loss_curve_path)
                 loss_curve_announced = True
@@ -183,7 +207,7 @@ def main():
             break
 
     try:
-        plot_iteration_val_accuracy(iter_log_csv, iter_val_acc_curve_path)
+        run_plot_process("iteration", iter_log_csv, iter_val_acc_curve_path)
         if os.path.isfile(iter_val_acc_curve_path):
             print("Iteration validation accuracy curve saved at:", iter_val_acc_curve_path)
     except Exception as exc:
