@@ -131,6 +131,7 @@ def get_default_config():
         "test": {
             "checkpoint": None,
             "num_samples": 256,
+            "seed": 42,
         },
     }
     return cfg

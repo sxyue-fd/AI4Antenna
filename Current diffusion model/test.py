@@ -48,7 +48,14 @@ def parse_args():
     parser.add_argument("--cfg_scale", type=float, default=None, help="Legacy shared classifier-free guidance scale")
     parser.add_argument("--s11_cfg_scale", type=float, default=None, help="S11 classifier-free guidance scale")
     parser.add_argument("--pattern_cfg_scale", type=float, default=None, help="Pattern classifier-free guidance scale")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument(
+        "--test_seed",
+        "--seed",
+        dest="test_seed",
+        type=int,
+        default=None,
+        help="Test-only seed for diffusion noise and visualization selection (default: 106)",
+    )
     parser.add_argument("--device", type=str, default=None, help="auto / cuda / cpu")
     parser.add_argument("--num_visualize", type=int, default=5, help="Number of random test samples to visualize")
     parser.add_argument("--no_visualize", action="store_true", help="Disable random test sample visualization")
@@ -87,6 +94,15 @@ def _configure_test_dirs(cfg, checkpoint, checkpoint_path, explicit_output_dir=N
     cfg["paths"]["output_dir"] = output_dir
     cfg["paths"]["log_dir"] = os.path.join(output_dir, "logs")
     cfg["paths"]["checkpoint_dir"] = os.path.join(output_dir, "checkpoints")
+    return cfg
+
+
+def _configure_test_seed(cfg, args):
+    test_cfg = cfg.setdefault("test", {})
+    if args.test_seed is not None:
+        test_cfg["seed"] = int(args.test_seed)
+    else:
+        test_cfg["seed"] = int(test_cfg.get("seed", 106))
     return cfg
 
 
@@ -158,8 +174,9 @@ def visualize_random_test_samples(
         return []
 
     num_visualize = min(int(num_visualize), len(test_dataset))
+    test_seed = int(cfg.get("test", {}).get("seed", 106))
     generator = torch.Generator()
-    generator.manual_seed(int(cfg.get("train", {}).get("seed", 106)))
+    generator.manual_seed(test_seed)
     local_indices = torch.randperm(len(test_dataset), generator=generator)[:num_visualize].tolist()
 
     currents = []
@@ -199,6 +216,8 @@ def visualize_random_test_samples(
     diffusion_model.eval()
     surrogate_model.eval()
 
+    # Keep visualization diffusion noise independent of the preceding evaluation.
+    set_seed(test_seed)
     denoising_timesteps = _uniform_denoising_timesteps(diffusion_model.num_timesteps, num_steps=5)
     generated_current, denoising_snapshots, denoising_timesteps = diffusion_model.sample_with_snapshots(
         batch_size=num_visualize,
@@ -258,6 +277,7 @@ def main():
         saved_cfg["test"]["checkpoint"] = checkpoint_path
         cfg = update_config_from_args(saved_cfg, args)
 
+    cfg = _configure_test_seed(cfg, args)
     cfg = _configure_test_dirs(cfg, checkpoint, checkpoint_path, explicit_output_dir=args.output_dir)
 
     ensure_dir(cfg["paths"]["output_dir"])
@@ -269,10 +289,17 @@ def main():
         log_filename="test.log",
     )
 
-    set_seed(cfg["train"]["seed"])
+    test_seed = cfg["test"]["seed"]
+    set_seed(test_seed)
     device = _device_from_cfg(cfg)
     logger.info("Using device: %s", device)
     logger.info("Checkpoint: %s", checkpoint_path)
+    logger.info(
+        "Seeds: train=%s, split=%s, test=%s",
+        cfg.get("train", {}).get("seed"),
+        cfg.get("split", {}).get("seed"),
+        test_seed,
+    )
     logger.info("Configuration:")
     logger.info("\n%s", pprint.pformat(cfg, sort_dicts=False))
 
@@ -304,6 +331,8 @@ def main():
     validate_forward_surrogate_shapes(surrogate_checkpoint, dataset_info)
 
     sample_path = os.path.join(cfg["paths"]["output_dir"], "samples", "test_samples.pt")
+    # Reset immediately before evaluation so its diffusion noise is controlled by test.seed.
+    set_seed(test_seed)
     metrics = sample_and_evaluate(
         diffusion_model=diffusion_model,
         surrogate_model=surrogate_model,
